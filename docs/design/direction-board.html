@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Studio Model — direction board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #F5F3EF; --sheet: #FFFFFF; --graphite: #1C1D21; --m1: #E6E3DD; --m2: #CFCBC3; --m3: #8F8B84;
+    --ink: #18191C; --signal: #E8552B;
+    --available: #4F8F67; --working: #3462D8; --review: #5B5FC7; --testing: #1F8A8F; --meeting: #B7832A; --blocked: #C5303B; --paused: #8F8B84;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: "IBM Plex Sans", system-ui, sans-serif; background: var(--paper); color: var(--ink); width: 1600px; font-size: 13px; line-height: 20px; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  header.top { background: var(--graphite); color: #ECEBE8; padding: 28px 48px; display: flex; align-items: baseline; gap: 24px; }
+  header.top h1 { font-size: 20px; line-height: 26px; font-weight: 600; letter-spacing: -0.01em; }
+  header.top p { color: #9A9690; }
+  header.top .mark { width: 12px; height: 12px; background: var(--signal); display: inline-block; margin-right: 10px; transform: rotate(45deg); }
+  main { padding: 40px 48px 56px; display: grid; grid-template-columns: 1fr 1fr; gap: 48px 64px; }
+  section h2 { font-size: 11px; line-height: 16px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--m3); padding-bottom: 10px; border-bottom: 1px solid var(--m2); margin-bottom: 18px; }
+  .row { display: flex; gap: 0; }
+  .sw { flex: 1; height: 88px; padding: 10px; display: flex; flex-direction: column; justify-content: flex-end; font-size: 11px; line-height: 15px; }
+  .sw b { font-weight: 500; display: block; }
+  .states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 20px; margin-top: 18px; }
+  .state { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .type .l { display: flex; align-items: baseline; gap: 18px; padding: 7px 0; border-bottom: 1px solid var(--m1); }
+  .type .l span.k { width: 110px; color: var(--m3); font-size: 11px; }
+  .btn { height: 30px; padding: 0 12px; border-radius: 4px; font: 500 13px "IBM Plex Sans"; display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; }
+  .b1 { background: var(--ink); color: var(--paper); }
+  .b2 { border-color: var(--m2); background: var(--sheet); color: var(--ink); }
+  .b3 { background: transparent; color: var(--ink); }
+  .b4 { background: var(--signal); color: #fff; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; border-radius: 10px; font-size: 11px; font-weight: 500; background: var(--m1); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; font-weight: 500; color: var(--m3); font-size: 11px; padding: 6px 8px; border-bottom: 1px solid var(--m2); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--m1); }
+  tr.sel td { background: #FBEDE7; }
+  tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--signal); }
+  .av { width: 22px; height: 22px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 600; color: #fff; vertical-align: middle; margin-right: 8px; }
+  .model { background: #E9E6E0; border-radius: 6px; padding: 0; overflow: hidden; }
+  .caption { font-size: 12px; color: var(--m3); margin-top: 10px; }
+  .figs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .fig { background: var(--sheet); border-top: 1px solid var(--m2); padding: 10px 10px 12px; }
+  .fig p { font-size: 12px; font-weight: 500; }
+  .fig small { display: block; color: var(--m3); font-size: 11px; line-height: 15px; }
+  .rules li { list-style: none; padding: 7px 0; border-bottom: 1px solid var(--m1); display: flex; gap: 12px; }
+  .rules li span:first-child { color: var(--m3); width: 100px; flex-shrink: 0; font-size: 12px; }
+  .dark { background: #141518; color: #ECEBE8; padding: 18px; border-radius: 6px; }
+  .dark td { border-color: #26272C; } .dark th { border-color: #34363C; color: #7C7F88; }
+  .dark tr.sel td { background: #2A1C17; }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1><span class="mark"></span>AI Engineering Workspace · Studio Model</h1>
+  <p>Direction board — palette, type, system, Virtual Office figurines. For validation, not implementation.</p>
+</header>
+<main>
+  <section>
+    <h2>Palette · surfaces and structure</h2>
+    <div class="row">
+      <div class="sw" style="background:var(--paper);border:1px solid var(--m2)"><b>Paper</b><span class="mono">#F5F3EF</span></div>
+      <div class="sw" style="background:var(--sheet);border:1px solid var(--m2);border-left:0"><b>Sheet</b><span class="mono">#FFFFFF</span></div>
+      <div class="sw" style="background:var(--m1)"><b>Mineral 1</b><span class="mono">#E6E3DD</span></div>
+      <div class="sw" style="background:var(--m2)"><b>Mineral 2</b><span class="mono">#CFCBC3</span></div>
+      <div class="sw" style="background:var(--m3);color:#fff"><b>Mineral 3</b><span class="mono">#8F8B84</span></div>
+      <div class="sw" style="background:var(--graphite);color:#ECEBE8"><b>Graphite</b><span class="mono">#1C1D21</span></div>
+      <div class="sw" style="background:#141518;color:#ECEBE8"><b>Slate (dark)</b><span class="mono">#141518</span></div>
+      <div class="sw" style="background:var(--signal);color:#fff;flex:0.8"><b>Signal</b><span class="mono">#E8552B</span></div>
+    </div>
+    <div class="states">
+      <div class="state"><span class="dot" style="background:var(--available)"></span>Available</div>
+      <div class="state"><span class="dot" style="background:var(--working)"></span>Thinking · developing</div>
+      <div class="state"><span class="dot" style="background:var(--review)"></span>Reviewing</div>
+      <div class="state"><span class="dot" style="background:var(--testing)"></span>Testing</div>
+      <div class="state"><span class="dot" style="background:var(--meeting)"></span>In meeting</div>
+      <div class="state"><span class="dot" style="border:1.5px dashed var(--signal)"></span>Awaiting validation</div>
+      <div class="state"><span style="width:9px;height:9px;background:var(--blocked);transform:rotate(45deg)"></span>Blocked</div>
+      <div class="state"><span class="dot" style="background:var(--paused);opacity:.6"></span>Paused</div>
+    </div>
+    <p class="caption">Signal orange marks what is live or needs you — never a large fill. Blocked is carmine with a diamond shape, so attention and error never look alike.</p>
+  </section>
+
+  <section class="type">
+    <h2>Type · IBM Plex Sans + IBM Plex Mono</h2>
+    <div class="l"><span class="k">28/32 · key figure</span><span style="font-size:28px;line-height:32px;font-weight:500" class="mono">$12.40 <span style="font-size:15px;color:var(--m3)">/ $50.00</span></span></div>
+    <div class="l"><span class="k">20/26 · screen</span><span style="font-size:20px;line-height:26px;font-weight:600;letter-spacing:-0.01em">Banking Core — what needs you</span></div>
+    <div class="l"><span class="k">15/22 · section</span><span style="font-size:15px;font-weight:600">Blocked and waiting</span></div>
+    <div class="l"><span class="k">13/20 · body</span><span>The Lead proposes 6 roles; each is justified by a passage of the specification.</span></div>
+    <div class="l"><span class="k">12/18 · data</span><span class="mono" style="font-size:12px">T-14 · claude-opus-5-5 · 18.2k in / 2.1k out · $0.1430 · 14:32:07</span></div>
+    <div class="l"><span class="k">11/16 · label</span><span style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--m3)">Acceptance criteria</span></div>
+  </section>
+
+  <section>
+    <h2>System · controls and dense data (light)</h2>
+    <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap">
+      <span class="btn b1">Brief the Lead</span><span class="btn b2">Ask for a revision</span><span class="btn b3">Cancel</span><span class="btn b4">Hire 4 agents</span>
+      <span class="badge"><span class="dot" style="background:var(--working)"></span>Thinking</span>
+      <span class="badge"><span class="dot" style="background:var(--meeting)"></span>Kickoff · room A</span>
+      <span class="badge" style="background:#F6E1E2;color:var(--blocked)">◆ Blocked</span>
+    </div>
+    <table>
+      <tr><th>Agent</th><th>State</th><th>Mission</th><th class="mono">Model</th><th style="text-align:right">7 days</th></tr>
+      <tr><td><span class="av" style="background:#6E6A86">L</span>Lead</td><td><span class="dot" style="display:inline-block;background:var(--working);margin-right:6px"></span>Thinking</td><td>Project plan</td><td class="mono">opus-5-5</td><td class="mono" style="text-align:right">$4.12</td></tr>
+      <tr class="sel"><td><span class="av" style="background:#4E6FA8">JE</span>Java Engineer 01</td><td><span class="dot" style="display:inline-block;background:var(--meeting);margin-right:6px"></span>In meeting</td><td>T-3 Accounts service</td><td class="mono">opus-5-5</td><td class="mono" style="text-align:right">$1.08</td></tr>
+      <tr><td><span class="av" style="background:#A08A4A">QE</span>QA Engineer 01</td><td><span style="display:inline-block;width:8px;height:8px;background:var(--blocked);transform:rotate(45deg);margin-right:6px"></span>Blocked</td><td>T-7 Transfer tests</td><td class="mono">opus-5-5</td><td class="mono" style="text-align:right">$0.64</td></tr>
+      <tr><td><span class="av" style="background:#4F8C7A">RE</span>React Engineer 01</td><td><span class="dot" style="display:inline-block;background:var(--available);margin-right:6px"></span>Available</td><td style="color:var(--m3)">—</td><td class="mono">opus-5-5</td><td class="mono" style="text-align:right">$0.00</td></tr>
+    </table>
+    <p class="caption">Lists before cards. Selection is an orange edge and a warm tint, not a glowing border.</p>
+  </section>
+
+  <section>
+    <h2>System · the same table, dark theme</h2>
+    <div class="dark">
+      <table>
+        <tr><th>Agent</th><th>State</th><th>Mission</th><th class="mono">Model</th><th style="text-align:right">7 days</th></tr>
+        <tr><td><span class="av" style="background:#6E6A86">L</span>Lead</td><td><span class="dot" style="display:inline-block;background:#5B86F0;margin-right:6px"></span>Thinking</td><td>Project plan</td><td class="mono">opus-5-5</td><td class="mono" style="text-align:right">$4.12</td></tr>
+        <tr class="sel"><td style="box-shadow:inset 2px 0 0 #F06A3F"><span class="av" style="background:#4E6FA8">JE</span>Java Engineer 01</td><td><span class="dot" style="display:inline-block;background:#D29C3E;margin-right:6px"></span>In meeting</td><td>T-3 Accounts service</td><td class="mono">opus-5-5</td><td class="mono" style="text-align:right">$1.08</td></tr>
+        <tr><td><span class="av" style="background:#A08A4A">QE</span>QA Engineer 01</td><td><span style="display:inline-block;width:8px;height:8px;background:#E0505A;transform:rotate(45deg);margin-right:6px"></span>Blocked</td><td>T-7 Transfer tests</td><td class="mono">opus-5-5</td><td class="mono" style="text-align:right">$0.64</td></tr>
+      </table>
+    </div>
+    <ul class="rules" style="margin-top:18px;padding:0">
+      <li><span>Radii</span><span>4 controls · 6 floating panels · 10 modals. No pills except state badges.</span></li>
+      <li><span>Borders</span><span>Only between areas of different nature. Inside an area: space and hairlines.</span></li>
+      <li><span>Shadows</span><span>Only on what floats (menus, inspector, modals). Nothing at rest.</span></li>
+      <li><span>Motion</span><span>120 ms hover · 180 ms panels · cubic-bezier(0.2, 0, 0, 1) · off with reduced motion.</span></li>
+    </ul>
+  </section>
+
+  <section style="grid-column: 1 / -1">
+    <h2>Virtual Office · the studio model (study)</h2>
+    <div style="display:grid;grid-template-columns: 1.35fr 1fr;gap:32px">
+      <div class="model">
+        <svg viewBox="0 0 860 470" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="IBM Plex Sans">
+          <defs>
+            <linearGradient id="table" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#E9E6E0"/><stop offset="1" stop-color="#DEDAD3"/></linearGradient>
+          </defs>
+          <rect width="860" height="470" fill="url(#table)"/>
+          <!-- slab -->
+          <polygon points="430,40 820,235 430,430 40,235" fill="#F7F5F1"/>
+          <polygon points="40,235 430,430 430,444 40,249" fill="#D3CEC6"/>
+          <polygon points="430,430 820,235 820,249 430,444" fill="#C7C2BA"/>
+          <!-- backend zone floor -->
+          <polygon points="250,145 430,235 340,280 160,190" fill="#4E6FA8" fill-opacity="0.08"/>
+          <!-- meeting room -->
+          <polygon points="520,115 640,175 560,215 440,155" fill="#B7832A" fill-opacity="0.07"/>
+          <!-- low walls (paperboard) -->
+          <polygon points="250,145 430,235 430,226 250,136" fill="#E4E0D9"/>
+          <polygon points="160,190 250,145 250,136 160,181" fill="#ECE9E3"/>
+          <polygon points="520,115 640,175 640,163 520,103" fill="#E4E0D9"/>
+          <polygon points="440,155 520,115 520,103 440,143" fill="#ECE9E3"/>
+          <!-- glass for meeting room front -->
+          <polygon points="440,155 560,215 560,203 440,143" fill="#BFD3DA" fill-opacity="0.35"/>
+          <!-- labels -->
+          <text x="120" y="150" font-size="11" font-weight="600" fill="#4E6FA8" letter-spacing="0.6">BACKEND</text>
+          <text x="120" y="164" font-size="10" fill="#8F8B84">3 agents · 2 at work</text>
+          <text x="560" y="100" font-size="11" font-weight="600" fill="#B7832A" letter-spacing="0.6">ROOM A · KICKOFF</text>
+          <text x="560" y="114" font-size="10" fill="#8F8B84">4 participants · turn 3/4</text>
+
+          <!-- desks -->
+          <g id="desk">
+            <polygon points="0,0 34,-17 68,0 34,17" fill="#FFFFFF"/>
+            <polygon points="0,0 34,17 34,24 0,7" fill="#D9D5CE"/>
+            <polygon points="34,17 68,0 68,7 34,24" fill="#CBC6BE"/>
+          </g>
+          <use href="#desk" x="215" y="190"/>
+          <use href="#desk" x="285" y="225"/>
+          <use href="#desk" x="285" y="155"/>
+          <!-- screens -->
+          <polygon points="232,178 252,168 252,184 232,194" fill="#3462D8"/>
+          <polygon points="302,213 322,203 322,219 302,229" fill="#2B2E35"/>
+          <polygon points="302,143 322,133 322,149 302,159" fill="#2B2E35"/>
+          <line x1="236" y1="183" x2="248" y2="177" stroke="#BFD0FF" stroke-width="1.2"/>
+          <line x1="236" y1="187" x2="245" y2="182" stroke="#BFD0FF" stroke-width="1.2"/>
+
+          <!-- figurine template: thinking (leaning) -->
+          <g transform="translate(232,214)">
+            <ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity="0.12"/>
+            <path d="M-6,-2 L-5,-20 Q0,-25 5,-20 L6,-2 Z" fill="#4E6FA8"/>
+            <circle cx="2" cy="-28" r="5" fill="#2E3036"/>
+            <circle cx="2" cy="-44" r="4" fill="#3462D8" opacity="0.9"/>
+            <circle cx="2" cy="-44" r="7" fill="none" stroke="#3462D8" stroke-opacity="0.35"/>
+          </g>
+          <!-- available (upright) -->
+          <g transform="translate(302,249)">
+            <ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity="0.12"/>
+            <path d="M-6,-2 L-6,-21 Q0,-26 6,-21 L6,-2 Z" fill="#4E6FA8"/>
+            <circle cx="0" cy="-30" r="5" fill="#2E3036"/>
+          </g>
+          <!-- blocked (arms crossed + diamond) -->
+          <g transform="translate(302,179)">
+            <ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity="0.12"/>
+            <path d="M-6,-2 L-6,-21 Q0,-26 6,-21 L6,-2 Z" fill="#4E6FA8"/>
+            <rect x="-7" y="-15" width="14" height="4" rx="2" fill="#3F5C8E"/>
+            <circle cx="0" cy="-30" r="5" fill="#2E3036"/>
+            <rect x="-4.5" y="-50" width="9" height="9" fill="#C5303B" transform="rotate(45 0 -45.5)"/>
+          </g>
+
+          <!-- meeting table -->
+          <ellipse cx="540" cy="168" rx="40" ry="19" fill="#FFFFFF"/>
+          <ellipse cx="540" cy="172" rx="40" ry="19" fill="none" stroke="#CBC6BE"/>
+          <g transform="translate(505,170)"><path d="M-5,-1 L-5,-17 Q0,-21 5,-17 L5,-1Z" fill="#6E6A86"/><circle cx="0" cy="-24" r="4.2" fill="#2E3036"/><circle cx="0" cy="-37" r="3.6" fill="#B7832A"/><circle cx="0" cy="-37" r="6.5" fill="none" stroke="#B7832A" stroke-opacity=".35"/></g>
+          <g transform="translate(540,150)"><path d="M-5,-1 L-5,-17 Q0,-21 5,-17 L5,-1Z" fill="#4E6FA8"/><circle cx="0" cy="-24" r="4.2" fill="#2E3036"/></g>
+          <g transform="translate(578,170)"><path d="M-5,-1 L-5,-17 Q0,-21 5,-17 L5,-1Z" fill="#A08A4A"/><circle cx="0" cy="-24" r="4.2" fill="#2E3036"/></g>
+          <g transform="translate(548,196)"><path d="M-5,-1 L-5,-17 Q0,-21 5,-17 L5,-1Z" fill="#4F8C7A"/><circle cx="0" cy="-24" r="4.2" fill="#2E3036"/></g>
+
+          <!-- collaboration arc: assignment from Lead (room) to backend desk -->
+          <path d="M505,138 Q380,60 232,180" fill="none" stroke="#4F8F67" stroke-width="1.6" stroke-dasharray="3 3"/>
+          <circle cx="330" cy="108" r="3.2" fill="#4F8F67"/>
+          <g transform="translate(340,74)">
+            <rect x="0" y="0" width="178" height="34" rx="4" fill="#FFFFFF" stroke="#CFCBC3"/>
+            <text x="10" y="14" font-size="10" fill="#8F8B84">Lead → Java Engineer 01 · assignment</text>
+            <text x="10" y="27" font-size="11" fill="#18191C">Start with the accounts schema…</text>
+          </g>
+
+          <!-- HUD fragments -->
+          <g transform="translate(24,24)">
+            <rect width="196" height="54" rx="6" fill="#1C1D21"/>
+            <text x="14" y="22" font-size="12" font-weight="600" fill="#ECEBE8">Banking Core</text>
+            <text x="14" y="40" font-size="11" fill="#9A9690" font-family="IBM Plex Mono">14:32:07 · live · 6 at work</text>
+            <circle cx="180" cy="18" r="3.5" fill="#E8552B"/>
+          </g>
+          <g transform="translate(24,392)">
+            <rect width="300" height="54" rx="6" fill="#FFFFFF" stroke="#CFCBC3"/>
+            <text x="14" y="21" font-size="10" font-weight="600" fill="#8F8B84" letter-spacing="0.8">RIGHT NOW</text>
+            <text x="14" y="40" font-size="11.5" fill="#18191C">Kickoff in room A · Lead writes the plan · 1 blocked</text>
+          </g>
+        </svg>
+      </div>
+      <div>
+        <div class="figs">
+          <div class="fig"><svg viewBox="-20 -60 40 66" height="76"><ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity=".12"/><path d="M-6,-2 L-6,-21 Q0,-26 6,-21 L6,-2 Z" fill="#4E6FA8"/><circle cx="0" cy="-30" r="5" fill="#2E3036"/></svg><p>Available</p><small>Upright, screen asleep. No lantern.</small></div>
+          <div class="fig"><svg viewBox="-20 -60 40 66" height="76"><ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity=".12"/><path d="M-6,-2 L-5,-20 Q0,-25 5,-20 L6,-2 Z" fill="#4E6FA8"/><circle cx="2" cy="-28" r="5" fill="#2E3036"/><circle cx="2" cy="-44" r="4" fill="#3462D8"/><circle cx="2" cy="-44" r="7" fill="none" stroke="#3462D8" stroke-opacity=".35"/></svg><p>Thinking</p><small>Leans in. Cobalt lantern pulses only during a real model call.</small></div>
+          <div class="fig"><svg viewBox="-20 -60 40 66" height="76"><ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity=".12"/><path d="M-6,-2 L-5,-20 Q0,-25 5,-20 L6,-2 Z" fill="#4E6FA8"/><circle cx="2" cy="-28" r="5" fill="#2E3036"/><circle cx="2" cy="-44" r="4" fill="#5B5FC7"/></svg><p>Reviewing</p><small>Second screen shows a diff. Indigo lantern (increment 4).</small></div>
+          <div class="fig"><svg viewBox="-20 -60 40 66" height="76"><ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity=".12"/><path d="M-6,-2 L-6,-21 Q0,-26 6,-21 L6,-2 Z" fill="#A08A4A"/><circle cx="0" cy="-30" r="5" fill="#2E3036"/><circle cx="0" cy="-45" r="4" fill="#1F8A8F"/></svg><p>Testing</p><small>Standing at the test bench. Teal lantern (increment 4).</small></div>
+          <div class="fig"><svg viewBox="-20 -60 40 66" height="76"><ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity=".12"/><path d="M-5,-1 L-5,-17 Q0,-21 5,-17 L5,-1Z" fill="#6E6A86"/><circle cx="0" cy="-24" r="4.2" fill="#2E3036"/><circle cx="0" cy="-37" r="3.6" fill="#B7832A"/></svg><p>In meeting</p><small>Walked to the room. The speaker carries the ochre lantern.</small></div>
+          <div class="fig"><svg viewBox="-20 -60 40 66" height="76"><ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity=".12"/><path d="M-6,-2 L-6,-21 Q0,-26 6,-21 L6,-2 Z" fill="#4E6FA8"/><circle cx="0" cy="-30" r="5" fill="#2E3036"/><circle cx="0" cy="-45" r="5" fill="none" stroke="#E8552B" stroke-width="1.5" stroke-dasharray="2 2"/></svg><p>Awaiting validation</p><small>Deliverable submitted. Dashed signal ring.</small></div>
+          <div class="fig"><svg viewBox="-20 -60 40 66" height="76"><ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity=".12"/><path d="M-6,-2 L-6,-21 Q0,-26 6,-21 L6,-2 Z" fill="#4E6FA8"/><rect x="-7" y="-15" width="14" height="4" rx="2" fill="#3F5C8E"/><circle cx="0" cy="-30" r="5" fill="#2E3036"/><rect x="-4.5" y="-50" width="9" height="9" fill="#C5303B" transform="rotate(45 0 -45.5)"/></svg><p>Blocked</p><small>Arms crossed, carmine diamond. Always a recorded reason.</small></div>
+          <div class="fig"><svg viewBox="-20 -60 40 66" height="76"><g opacity=".38"><ellipse cx="0" cy="0" rx="9" ry="4" fill="#000" fill-opacity=".12"/><path d="M-6,-2 L-6,-21 Q0,-26 6,-21 L6,-2 Z" fill="#4E6FA8"/><circle cx="0" cy="-30" r="5" fill="#2E3036"/></g></svg><p>Paused</p><small>Translucent, chair pushed back.</small></div>
+        </div>
+        <p class="caption" style="margin-top:16px">Architect's-model figurines: adult proportions, no cartoon faces, department colour on clothing only. State is read from posture and one lantern, never from a cloud of icons. Nothing moves without a real event.</p>
+      </div>
+    </div>
+  </section>
+</main>
+</body>
+</html>

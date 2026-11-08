@@ -1,0 +1,17 @@
+import { chromium } from "playwright-core";
+import fs from "node:fs";
+const env = Object.fromEntries(fs.readFileSync(new URL("../../.env", import.meta.url), "utf8").split("\n").filter((l) => l.includes("=") && !l.startsWith("#")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]));
+const browser = await chromium.launch({ executablePath: "/usr/bin/google-chrome", headless: true });
+const page = await browser.newPage();
+page.on("console", (m) => m.type() === "error" && console.log("console:", m.text().slice(0, 500)));
+page.on("pageerror", (e) => console.log("pageerror:", e.message.slice(0, 500)));
+await page.goto("http://localhost:5180");
+await page.fill('input[type="email"]', env.AIW_DEV_TEST_EMAIL);
+await page.fill('input[type="password"]', env.AIW_DEV_TEST_PASSWORD);
+await page.click('button[type="submit"]');
+await page.waitForURL(/\/w\//);
+const ws = page.url().match(/\/w\/([^/]+)/)[1];
+const p = (await page.evaluate(async (w) => (await fetch(`/api/v1/workspaces/${w}/projects`)).json(), ws))[0].id;
+await page.goto(`http://localhost:5180/w/${ws}/p/${p}/${process.argv[2]}`);
+await page.waitForTimeout(2000);
+await browser.close();

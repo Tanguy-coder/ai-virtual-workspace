@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: aiw
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${AIW_DB_URL:jdbc:postgresql://localhost:55432/aiw}
+    username: ${AIW_DB_USER:aiw}
+    password: ${AIW_DB_PASSWORD:}
+  data:
+    redis:
+      host: ${AIW_REDIS_HOST:localhost}
+      port: ${AIW_REDIS_PORT:56379}
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 6MB
+
+server:
+  port: ${AIW_PORT:8090}
+  servlet:
+    session:
+      timeout: 12h
+      cookie:
+        http-only: true
+        same-site: lax
+        name: AIW_SESSION
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+aiw:
+  security:
+    master-key: ${AIW_MASTER_KEY}
+  web:
+    allowed-origins: ${AIW_ALLOWED_ORIGINS:http://localhost:5180}
