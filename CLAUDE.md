@@ -44,7 +44,7 @@ Scope is the **complete product**, not an MVP. It is delivered in 6 increments (
 - Providers: Anthropic + any OpenAI-compatible API, behind an in-house model-gateway abstraction. Agent tools use MCP.
 - Backend: Java 21 / Spring Boot modular monolith (Spring Modulith, 16 modules), plus separate `agent-worker` processes and one ephemeral Docker sandbox per task. Agent code never runs in the api process.
 - PostgreSQL 16 (+ pgvector, transactional outbox) and Redis 7 Streams. No Kafka for now.
-- Frontend: React + TypeScript; PixiJS (2D isometric WebGL) for the Virtual Office; Monaco for the Code Workspace; WebSocket/STOMP for events.
+- Frontend: React + TypeScript; React Three Fiber + drei (Three.js) for the Virtual Office (replaces the earlier PixiJS choice, see `docs/07`); Monaco for the Code Workspace; WebSocket/STOMP for events.
 - In-house orchestration engine with persistent steps, leases/heartbeats, idempotent tool calls, and a watchdog.
 - Git: local repo per project plus GitHub remote; GitLab comes in increment 6.
 
@@ -84,7 +84,7 @@ Java 21 / Spring Boot backend where it fits, PostgreSQL, Redis for cache/coordin
 
 ## Code architecture (frontend)
 
-- `src/office/layout.ts` is the pure, tested floor geometry (zones, desk slots, seating, isometric projection). `src/office/OfficeScene.ts` is an imperative PixiJS scene driven by React (`setAgents`, `select`); it must only render recorded state. Entrance walks happen only for `agent.hired` events received live (`useRealtime().arrivals`), never for replayed ones.
+- Virtual Office (`src/office3d/`): `plan.ts` is the pure, tested floor plan (13 rooms in metres, desks, seating, meeting placement, walking routes). `represent.ts` is the representation engine: a pure function from recorded state (agents, open meetings) to figures (spot, posture, state light) and desks (screen content). Components only render that output: `Building` (static architecture), `Workstation`, `Person` (articulated figure posed by joint angles, so a rigged glTF can replace the body), `OfficeCanvas` (camera levels company → room → agent, signs, message arcs), `FloorPlan` (minimap and the 2D view on small screens). The canvas uses `frameloop="demand"`: anything animated must call `invalidate()` only while its recorded cause lasts. Entrance walks happen only for `agent.hired` events received live (`useRealtime().arrivals`), never for replayed ones. Visual check: `node scripts/office-shots.mjs <outDir> [keys...]` (`MEETING=1` convenes a real meeting first).
 - `src/realtime/realtime.ts` owns the STOMP connection, replays missed events by seq on (re)connect, and invalidates TanStack Query keys per event type. New event types need a mapping there and a description in `src/lib/events.ts`.
 - The agent drawer is global (`src/lib/selection.ts` + `components/AgentDrawer.tsx`); open it with `useSelection().open(id)` instead of building per-page agent panels.
 - Design system "Studio Model" (validated): paper/graphite, mineral greys, one signal-orange accent used only for what is live or needs the CTO, IBM Plex Sans + Mono (self-hosted via @fontsource). Tokens are CSS variables in `src/index.css` (paper/light default, slate/dark via `data-theme`), exposed as Tailwind colors (`bg-panel`, `bg-panel-2`, `border-line`, `text-muted`, `text-faint`, `bg-ink`, `bg-graphite`, `accent`, state colors `ok/active/review/testing/warn/danger`). No gradients, no shadows at rest, lists and tables before cards.

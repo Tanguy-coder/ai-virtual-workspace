@@ -22,7 +22,7 @@ const p = projects[0]?.id ?? "none";
 for (const path of paths) {
   const url = base + path.replace("{ws}", ws).replace("{p}", p);
   await page.goto(url);
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(Number(process.env.SHOT_WAIT ?? 1500));
   const name = path.replace(/[{}\/]/g, "_").replace(/^_+/, "") || "root";
   await page.screenshot({ path: `${outDir}/${name}.png` });
   console.log(`${outDir}/${name}.png`);

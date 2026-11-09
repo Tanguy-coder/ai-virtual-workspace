@@ -31,6 +31,23 @@ Application de la direction validée « Studio Model » (`docs/06`) à l'ensembl
 
 ## Reste
 
-1. **Virtual Office en React Three Fiber**, selon `docs/07` : décor procédural, personnages articulés en glTF, trois niveaux de navigation. La scène PixiJS actuelle reste en place d'ici là.
+1. **Personnages glTF** : le Virtual Office en React Three Fiber est livré (voir ci-dessous), avec des personnages articulés procéduraux. Reste à les remplacer par un modèle humain riggé en glTF avec ses clips d'animation.
 2. **Engineering Workspace** (incrément 4) : maquette à valider avant implémentation.
 3. **Finitions** : notifications discrètes (toasts), menus contextuels, vérification tablette détaillée.
+
+## Étape 2 : Virtual Office en React Three Fiber (2026-11-09)
+
+- **Fait**
+  - La scène PixiJS est remplacée par une scène Three.js (React Three Fiber + drei), chargée à la demande.
+  - Étage de la maquette validée : 13 espaces, cloisons pleines et vitrées, sols différenciés, mobilier par métier. « Mobile Engineering » devient « Specialists » (département `OTHER`).
+  - Moteur de représentation pur et testé (`src/office3d/represent.ts`) : état enregistré → lieu, posture, écran, témoin.
+    - Disponible : assis, écran en veille. Appel de modèle en cours : tape au clavier, écran « model call running ». Bloqué : bras croisés, losange, raison enregistrée à l'écran. En pause : estompé.
+    - Réunion ouverte : les participants marchent jusqu'à la salle A ou B ; l'organisateur se tient à l'écran mural, qui affiche le vrai titre, le tour et l'orateur.
+  - Écrans muraux DevOps et Sécurité, bancs de test et baies : éteints, rien de réel ne les alimente encore.
+  - Navigation : entreprise → département (double-clic, touches 1–9, plan, sélecteur) → poste (clic, ouvre le panneau agent global). Q/E pour tourner, Échap pour remonter, `prefers-reduced-motion` respecté.
+  - Plan 2D cliquable (minimap avec cadre de vue), bandeau « Right now » issu de l'état réel, vue liste conservée, plan 2D seul sur mobile.
+- **Vérifié** : 10 tests unitaires du plan et du moteur ; captures en Chrome headless des vues entreprise, Backend et poste du Lead, puis d'une vraie réunion convoquée par l'API (marche, placement, écran mural) ; aucune erreur d'exécution.
+- **Limites connues**
+  - Personnages procéduraux, pas encore glTF.
+  - Thème sombre et rendu mobile non vérifiés à l'écran.
+  - Pas encore de mesure de performance à 50 agents.
