@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ban, CheckCircle2, Circle, Lock, LockOpen, Plus, Send, X } from "lucide-react";
+import { Ban, CheckCircle2, Circle, Lock, LockOpen, Pencil, Plus, Send, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { Agent, EventRecord, Message, Task } from "../api/types";
@@ -9,7 +9,7 @@ import { byId, useAgents, useTasks } from "../lib/queries";
 import { useSelection } from "../lib/selection";
 import { PRIORITY_TONE, STATUS_TONE, statusLabel } from "../lib/tasks";
 import { AgentAvatar } from "./AgentAvatar";
-import { Badge, Button, ErrorText, Select, Tabs, Textarea } from "./ui";
+import { Badge, Button, ErrorText, Field, Input, Select, Tabs, Textarea } from "./ui";
 
 /** Global task drawer (UX §7 Tasks): criteria, assignee, dependencies, discussion and history. */
 export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
@@ -26,13 +26,14 @@ export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
   const [tab, setTab] = useState<"details" | "discussion" | "history">("details");
   const [blocking, setBlocking] = useState(false);
   const [reason, setReason] = useState("");
+  const [editing, setEditing] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [close]);
-  useEffect(() => { setTab("details"); setBlocking(false); }, [taskId]);
+  useEffect(() => { setTab("details"); setBlocking(false); setEditing(false); }, [taskId]);
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["task", taskId] });
@@ -69,6 +70,9 @@ export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
                   <Badge>{t.sourceKind === "PLAN" ? "planned by the Lead" : t.sourceKind === "MEETING" ? "from a meeting" : "created by you"}</Badge>
                 </div>
               </div>
+              {!closed && !editing && (
+                <Button variant="ghost" size="sm" onClick={() => { setTab("details"); setEditing(true); }}><Pencil size={13} /> Edit</Button>
+              )}
               <button onClick={close} className="rounded-lg p-1.5 text-muted hover:bg-panel-2 hover:text-fg" aria-label="Close"><X size={18} /></button>
             </div>
             {t.status === "BLOCKED" && t.blockedReason && (
@@ -83,7 +87,8 @@ export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
             ]} />
           </div>
 
-          {tab === "details" && (
+          {tab === "details" && editing && <EditTask task={t} onDone={() => { setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />}
+          {tab === "details" && !editing && (
             <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-5">
               <section>
                 <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">Assignee</p>
@@ -252,5 +257,44 @@ function History({ workspaceId, taskId, names }: { workspaceId: string; taskId: 
         </li>
       ))}
     </ol>
+  );
+}
+
+/** Edits what the task asks for. Status, assignee and dependencies have their own controls. */
+function EditTask({ task, onDone, onCancel }: { task: Task; onDone(): void; onCancel(): void }) {
+  const [title, setTitle] = useState(task.title);
+  const [description, setDescription] = useState(task.description ?? "");
+  const [criteria, setCriteria] = useState(task.acceptanceCriteria.map((c) => c.text).join("\n"));
+  const [priority, setPriority] = useState(task.priority);
+  const [estimate, setEstimate] = useState(task.estimateDays == null ? "" : String(Number(task.estimateDays)));
+  const save = useMutation({
+    mutationFn: () => api.put(`/api/v1/tasks/${task.id}`, {
+      title: title.trim(), description: description.trim(), priority,
+      acceptanceCriteria: criteria.split("\n").map((c) => c.trim()).filter(Boolean),
+      estimateDays: estimate === "" ? null : Number(estimate),
+    }),
+    onSuccess: onDone,
+  });
+  return (
+    <form className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5" onSubmit={(e) => { e.preventDefault(); save.mutate(); }}>
+      <Field label="Title"><Input required maxLength={200} value={title} onChange={(e) => setTitle(e.target.value)} /></Field>
+      <Field label="Description"><Textarea rows={6} value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
+      <Field label="Acceptance criteria" hint="One per line, objective and verifiable. Editing them resets their checks.">
+        <Textarea rows={5} value={criteria} onChange={(e) => setCriteria(e.target.value)} />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Priority">
+          <Select value={priority} onChange={(e) => setPriority(e.target.value as Task["priority"])}>
+            {(["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const).map((p) => <option key={p} value={p}>{p.toLowerCase()}</option>)}
+          </Select>
+        </Field>
+        <Field label="Estimate (days)"><Input type="number" min={0} max={100} step={0.5} value={estimate} onChange={(e) => setEstimate(e.target.value)} /></Field>
+      </div>
+      <ErrorText error={save.error} />
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="subtle" onClick={onCancel}>Cancel</Button>
+        <Button type="submit" disabled={save.isPending || !title.trim()}>Save</Button>
+      </div>
+    </form>
   );
 }

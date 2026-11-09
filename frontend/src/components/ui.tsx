@@ -44,7 +44,7 @@ export function Textarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return <textarea {...props} className={`px-2.5 py-1.5 leading-relaxed ${fieldBase} ${props.className ?? ""}`} />;
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+export function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
   return (
     <label className="block space-y-1">
       <span className="text-[12px] font-medium text-muted">{label}</span>

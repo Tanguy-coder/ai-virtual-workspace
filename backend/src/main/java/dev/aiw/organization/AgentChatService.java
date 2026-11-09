@@ -10,6 +10,7 @@ import dev.aiw.modelgateway.ModelResult;
 import dev.aiw.projects.Project;
 import dev.aiw.projects.ProjectDocument;
 import dev.aiw.projects.ProjectService;
+import dev.aiw.projects.SpecExcerpts;
 import dev.aiw.shared.Actor;
 import dev.aiw.shared.ApiException;
 import dev.aiw.shared.Ids;
@@ -38,8 +39,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class AgentChatService {
     private static final Logger log = LoggerFactory.getLogger(AgentChatService.class);
-    private static final int HISTORY_LIMIT = 40;
-    private static final long MAX_TOKENS = 16_000;
+    /** Recent messages sent with each reply; older ones are dropped (docs/09). */
+    private static final int HISTORY_LIMIT = 12;
+    /** Specification excerpts in the chat prompt, chosen by the agent's role so the prefix stays cacheable. */
+    private static final int SPEC_EXCERPTS = 5_000;
+    private static final long MAX_TOKENS = 4_000;
 
     private final JdbcClient jdbc;
     private final AgentService agents;
@@ -123,8 +127,10 @@ public class AgentChatService {
         agents.beginThinking(agentId, Map.of("model", agent.model()));
         ModelResult result;
         try {
+            // Stable system prompt and cached conversation: each reply re-reads the history from the provider cache.
             result = gateway.complete(new ModelRequest(agent.workspaceId(), agent.projectId(), agentId, agent.providerId(),
-                    agent.model(), systemPrompt(agent), turns(agentId), MAX_TOKENS, "medium"));
+                    agent.model(), systemPrompt(agent), null, turns(agentId), MAX_TOKENS, "medium",
+                    ModelRequest.Tier.STANDARD, ModelRequest.Cache.CONVERSATION));
         } catch (ModelCallException | ApiException e) {
             agents.endThinking(agentId);
             fail(agent, pendingIds, e.getMessage());
@@ -185,10 +191,9 @@ public class AgentChatService {
         if (specs.isEmpty()) {
             sb.append("No specification has been imported yet.\n");
         }
-        for (ProjectDocument d : specs) {
-            sb.append("<document title=\"").append(d.title()).append("\">\n").append(d.content()).append("\n</document>\n");
-        }
-        sb.append("</project>");
+        sb.append(SpecExcerpts.select(specs, agent.title() + " " + String.join(" ", agent.skills()) + " "
+                + String.join(" ", agent.responsibilities()), SPEC_EXCERPTS));
+        sb.append("</project>\nAnswer briefly and to the point; no preamble, no restating the question.");
         return sb.toString();
     }
 

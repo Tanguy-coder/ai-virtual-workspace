@@ -13,6 +13,7 @@ import dev.aiw.organization.AgentService;
 import dev.aiw.projects.Project;
 import dev.aiw.projects.ProjectDocument;
 import dev.aiw.projects.ProjectService;
+import dev.aiw.projects.SpecExcerpts;
 import dev.aiw.shared.Actor;
 import dev.aiw.shared.ApiException;
 import dev.aiw.shared.Ids;
@@ -41,8 +42,24 @@ public class AgentRunner {
         }
     }
 
-    private static final int SPEC_CHAR_BUDGET = 120_000;
-    private static final int MEMORY_CHAR_BUDGET = 20_000;
+    /** Whole specification, for the one step that must read all of it (the Lead's analysis). */
+    public static final int FULL_SPEC = 120_000;
+    /** Default excerpt budget: about 1.5 k tokens of the most relevant passages (docs/09). */
+    public static final int SPEC_EXCERPTS = 6_000;
+    private static final int MEMORY_CHAR_BUDGET = 6_000;
+    private static final int NOTES_CHAR_BUDGET = 1_500;
+
+    /**
+     * System prompt in two parts (docs/09): {@code stable} (instructions, project, specification excerpts) is
+     * identical across an agent's calls for the same purpose and is cached by the provider; {@code dynamic}
+     * (shared memory, own notes) changes as work is recorded.
+     */
+    public record Context(String stable, String dynamic, ModelRequest.Cache cache) {
+        /** The same context for a one-shot call: not worth a cache write. */
+        public Context oneShot() {
+            return new Context(stable, dynamic, ModelRequest.Cache.NONE);
+        }
+    }
 
     private final ModelGateway gateway;
     private final AgentService agents;
@@ -81,50 +98,61 @@ public class AgentRunner {
      * System prompt for structured work: the agent's instructions, the project, its specification and the shared
      * memory entries most relevant to {@code memoryQuery}, each section bounded in size.
      */
-    public String context(Agent agent, String memoryQuery) {
+    public Context context(Agent agent, String query) {
+        return context(agent, query, SPEC_EXCERPTS, MEMORY_CHAR_BUDGET);
+    }
+
+    /**
+     * Context bounded per section: up to {@code specChars} of the specification (the passages most relevant to
+     * {@code query}, whole when it fits) and up to {@code memoryChars} of shared memory. 0 leaves a section out.
+     */
+    public Context context(Agent agent, String query, int specChars, int memoryChars) {
         Project project = projects.find(agent.projectId()).orElseThrow();
         StringBuilder sb = new StringBuilder(agent.systemInstructions());
         sb.append("\n\n<project name=\"").append(escape(project.name())).append("\">\n");
         if (!project.description().isBlank()) sb.append(project.description()).append("\n");
-        int budget = SPEC_CHAR_BUDGET;
-        List<ProjectDocument> specs = projects.specifications(agent.projectId());
-        if (specs.isEmpty()) sb.append("No specification has been imported yet.\n");
-        for (ProjectDocument d : specs) {
-            String content = d.content().length() > budget ? d.content().substring(0, Math.max(budget, 0))
-                    + "\n[... truncated]" : d.content();
-            budget -= content.length();
-            sb.append("<document title=\"").append(escape(d.title())).append("\">\n").append(content).append("\n</document>\n");
+        if (specChars > 0) {
+            List<ProjectDocument> specs = projects.specifications(agent.projectId());
+            if (specs.isEmpty()) sb.append("No specification has been imported yet.\n");
+            else sb.append(SpecExcerpts.select(specs, query, specChars));
         }
         sb.append("</project>\n");
-        String shared = memory.forContext(agent.projectId(), memoryQuery, MEMORY_CHAR_BUDGET);
+        StringBuilder dyn = new StringBuilder();
+        String shared = memoryChars > 0 ? memory.forContext(agent.projectId(), query, memoryChars) : "";
         if (!shared.isBlank()) {
-            sb.append("\n<shared_memory>\nDecisions and knowledge recorded for this project (most relevant first):\n")
+            dyn.append("<shared_memory>\nDecisions and knowledge recorded for this project (most relevant first):\n")
                     .append(shared).append("</shared_memory>\n");
         }
-        String own = memory.forAgent(agent.id(), MEMORY_CHAR_BUDGET / 4);
+        String own = memoryChars > 0 ? memory.forAgent(agent.id(), NOTES_CHAR_BUDGET) : "";
         if (!own.isBlank()) {
-            sb.append("\n<your_notes>\nYour own working notes from earlier work:\n").append(own).append("</your_notes>\n");
+            dyn.append("<your_notes>\nYour own working notes from earlier work:\n").append(own).append("</your_notes>\n");
         }
-        return sb.toString();
+        return new Context(sb.toString(), dyn.toString(), ModelRequest.Cache.PREFIX);
     }
 
     /** One model call recorded as a step. */
-    public String complete(AgentJob job, Agent agent, String system, List<ChatTurn> turns, long maxTokens,
+    public String complete(AgentJob job, Agent agent, Context context, List<ChatTurn> turns, long maxTokens,
                            String effort, String summary) {
-        return call(job, agent, system, turns, maxTokens, effort, summary).text();
+        return call(job, agent, context, turns, maxTokens, effort, ModelRequest.Tier.STANDARD, summary).text();
     }
 
     /**
      * Asks for a single JSON object. The output is parsed and passed to {@code validator}; if parsing or
      * validation fails, the model gets one chance to correct it.
      */
-    public JsonNode completeJson(AgentJob job, Agent agent, String system, String prompt, long maxTokens, String effort,
+    public JsonNode completeJson(AgentJob job, Agent agent, Context context, String prompt, long maxTokens, String effort,
                                  String summary, Consumer<JsonNode> validator) {
+        return completeJson(job, agent, context, prompt, maxTokens, effort, ModelRequest.Tier.STANDARD, summary, validator);
+    }
+
+    /** As above; {@code tier} LIGHT runs the call on the provider's economy model (extraction, minutes). */
+    public JsonNode completeJson(AgentJob job, Agent agent, Context context, String prompt, long maxTokens, String effort,
+                                 ModelRequest.Tier tier, String summary, Consumer<JsonNode> validator) {
         List<ChatTurn> turns = new ArrayList<>(List.of(new ChatTurn(ChatTurn.Role.USER, prompt
                 + "\n\nReply with a single JSON object and nothing else: no prose, no Markdown code fence.")));
         String error = null;
         for (int attempt = 0; attempt < 2; attempt++) {
-            ModelResult result = call(job, agent, system, turns, maxTokens, effort,
+            ModelResult result = call(job, agent, context, turns, maxTokens, effort, tier,
                     attempt == 0 ? summary : summary + " (correction)");
             try {
                 if ("max_tokens".equals(result.stopReason())) {
@@ -134,6 +162,7 @@ public class AgentRunner {
                 validator.accept(node);
                 return node;
             } catch (InvalidOutput e) {
+                gateway.forget(result);
                 error = e.getMessage();
                 turns.add(new ChatTurn(ChatTurn.Role.ASSISTANT, result.text().isBlank() ? "(empty)" : result.text()));
                 turns.add(new ChatTurn(ChatTurn.Role.USER, "Your reply could not be used: " + e.getMessage()
@@ -143,15 +172,16 @@ public class AgentRunner {
         throw new JobFailure("The model did not produce a usable answer: " + error);
     }
 
-    private ModelResult call(AgentJob job, Agent agent, String system, List<ChatTurn> turns, long maxTokens,
-                             String effort, String summary) {
+    private ModelResult call(AgentJob job, Agent agent, Context context, List<ChatTurn> turns, long maxTokens,
+                             String effort, ModelRequest.Tier tier, String summary) {
         agents.beginThinking(agent.id(), Map.of("model", agent.model(), "step", summary));
         ModelResult result = null;
         String error = null;
         long start = System.nanoTime();
         try {
             result = gateway.complete(new ModelRequest(agent.workspaceId(), agent.projectId(), agent.id(),
-                    agent.providerId(), agent.model(), system, turns, maxTokens, effort));
+                    agent.providerId(), agent.model(), context.stable(), context.dynamic(), turns, maxTokens, effort,
+                    tier, context.cache()));
         } catch (ModelCallException e) {
             error = e.getMessage();
             throw e;

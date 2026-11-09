@@ -44,14 +44,47 @@ class ModelGatewayController {
         return providers.list(workspaceId);
     }
 
-    record CreateProvider(@NotNull ProviderKind kind, @NotBlank @Size(max = 100) String name,
-                          @Size(max = 500) String baseUrl, @Size(max = 500) String apiKey) {}
+    /** {@code preset} (see GET /api/v1/provider-presets) fills kind, base URL and suggested models; {@code kind} alone is the custom path. */
+    record CreateProvider(ProviderKind kind, @Size(max = 40) String preset, @NotBlank @Size(max = 100) String name,
+                          @Size(max = 500) String baseUrl, @Size(max = 500) String apiKey,
+                          @Size(max = 200) String defaultModel, @Size(max = 200) String economyModel) {}
 
     @PostMapping("/api/v1/workspaces/{workspaceId}/providers")
     @ResponseStatus(HttpStatus.CREATED)
     Provider create(@PathVariable String workspaceId, @Valid @RequestBody CreateProvider body) {
         String userId = access.require(workspaceId, WorkspaceRole.ADMIN);
-        return providers.create(workspaceId, userId, body.kind(), body.name(), body.baseUrl(), body.apiKey());
+        return providers.create(workspaceId, userId, body.kind(), body.name(), body.baseUrl(), body.apiKey(),
+                body.preset(), body.defaultModel(), body.economyModel());
+    }
+
+    record Models(@Size(max = 200) String defaultModel, @Size(max = 200) String economyModel) {}
+
+    @PutMapping("/api/v1/workspaces/{workspaceId}/providers/{providerId}/models")
+    Provider models(@PathVariable String workspaceId, @PathVariable String providerId, @Valid @RequestBody Models body) {
+        String userId = access.require(workspaceId, WorkspaceRole.ADMIN);
+        return providers.setModels(workspaceId, userId, providerId, body.defaultModel(), body.economyModel());
+    }
+
+    @PutMapping("/api/v1/workspaces/{workspaceId}/providers/{providerId}/default")
+    Provider makeDefault(@PathVariable String workspaceId, @PathVariable String providerId) {
+        String userId = access.require(workspaceId, WorkspaceRole.ADMIN);
+        return providers.makeDefault(workspaceId, userId, providerId);
+    }
+
+    /** Models the provider reports for the stored key (a real call to the provider, not billed). */
+    @GetMapping("/api/v1/workspaces/{workspaceId}/providers/{providerId}/models")
+    List<String> listModels(@PathVariable String workspaceId, @PathVariable String providerId) {
+        access.require(workspaceId, WorkspaceRole.MEMBER);
+        try {
+            return providers.models(workspaceId, providerId);
+        } catch (ModelCallException e) {
+            throw ApiException.badRequest("models_unavailable", e.getMessage());
+        }
+    }
+
+    @GetMapping("/api/v1/provider-presets")
+    List<ProviderPresets.Preset> presets() {
+        return ProviderPresets.ALL;
     }
 
     @DeleteMapping("/api/v1/workspaces/{workspaceId}/providers/{providerId}")

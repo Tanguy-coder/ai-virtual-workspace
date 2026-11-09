@@ -7,6 +7,7 @@ import { useOpenJobs, useTasks } from "../lib/queries";
 import { STATUS_TONE, statusLabel } from "../lib/tasks";
 import { useSelection } from "../lib/selection";
 import { relative, time, tokens, usd } from "../lib/format";
+import { useProviderModels } from "../lib/providers";
 import { AgentAvatar, DEPARTMENT_COLORS, DEPARTMENT_LABELS, StateDot } from "./AgentAvatar";
 import { Badge, Button, ErrorText, Field, Input, Select, Tabs, Textarea } from "./ui";
 
@@ -234,6 +235,7 @@ function AgentSettings({ agent, workspaceId }: { agent: Agent; workspaceId: stri
   const providers = useQuery({ queryKey: ["providers", workspaceId], queryFn: () => api.get<Provider[]>(`/api/v1/workspaces/${workspaceId}/providers`) });
   const [providerId, setProviderId] = useState(agent.providerId ?? "");
   const [model, setModel] = useState(agent.model ?? "");
+  const providerModels = useProviderModels(agent.workspaceId, providerId || null);
   const [instructions, setInstructions] = useState(agent.systemInstructions);
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["agent", agent.id] });
@@ -256,7 +258,11 @@ function AgentSettings({ agent, workspaceId }: { agent: Agent; workspaceId: stri
               {providers.data?.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
           </Field>
-          <Field label="Model id"><Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-opus-5-5" /></Field>
+          <Field label="Model id">
+            <Input list={`agent-models-${agent.id}`} value={model} onChange={(e) => setModel(e.target.value)}
+              placeholder={providers.data?.find((p) => p.id === providerId)?.defaultModel ?? "model id"} />
+            <datalist id={`agent-models-${agent.id}`}>{providerModels.data?.map((m) => <option key={m} value={m} />)}</datalist>
+          </Field>
         </div>
         <Button variant="ghost" onClick={() => bind.mutate()} disabled={!providerId || !model || bind.isPending}>Apply model</Button>
         <ErrorText error={bind.error} />

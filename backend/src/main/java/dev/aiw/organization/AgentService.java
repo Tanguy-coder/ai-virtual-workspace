@@ -4,7 +4,7 @@ import dev.aiw.events.EventPublisher;
 import dev.aiw.events.Subject;
 import dev.aiw.governance.AuditLog;
 import dev.aiw.modelgateway.Provider;
-import dev.aiw.modelgateway.ProviderCreated;
+import dev.aiw.modelgateway.DefaultModelChanged;
 import dev.aiw.modelgateway.ProviderKind;
 import dev.aiw.modelgateway.ProviderService;
 import dev.aiw.projects.ProjectCreated;
@@ -85,19 +85,18 @@ public class AgentService {
                 t.skills(), t.responsibilities(), true, Actor.system());
     }
 
-    /** Binds the first Anthropic provider to agents that have no model yet. */
+    /** Binds the workspace's default provider and model to agents that have no model yet. */
     @EventListener
     @Transactional
-    public void onProviderCreated(ProviderCreated event) {
-        if (event.kind() != ProviderKind.ANTHROPIC) return;
+    public void onDefaultModelChanged(DefaultModelChanged event) {
         List<String> unbound = jdbc.sql("SELECT id FROM agents WHERE workspace_id = ? AND provider_id IS NULL AND status <> 'DISMISSED'")
                 .param(event.workspaceId()).query(String.class).list();
         for (String agentId : unbound) {
             jdbc.sql("UPDATE agents SET provider_id = ?, model = ? WHERE id = ?")
-                    .params(event.providerId(), event.defaultModel(), agentId).update();
+                    .params(event.providerId(), event.model(), agentId).update();
             Agent a = find(agentId).orElseThrow();
             events.publish(a.workspaceId(), a.projectId(), "agent.model_bound", Actor.system(), new Subject("agent", agentId),
-                    Map.of("model", event.defaultModel()));
+                    Map.of("model", event.model()));
         }
     }
 
@@ -282,7 +281,7 @@ public class AgentService {
                         skills.toArray(String[]::new), responsibilities.toArray(String[]::new),
                         AgentInstructions.build(name, title, seniority, years, skills, responsibilities, lead),
                         provider.map(Provider::id).orElse(null),
-                        provider.map(p -> ProviderService.DEFAULT_ANTHROPIC_MODEL).orElse(null), lead)
+                        provider.map(Provider::defaultModel).orElse(null), lead)
                 .update();
         events.publish(workspaceId, projectId, "agent.hired", actor, new Subject("agent", id),
                 Map.of("name", name, "title", title, "department", t.department().name(), "lead", lead));

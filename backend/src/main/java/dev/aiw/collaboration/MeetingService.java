@@ -9,6 +9,7 @@ import dev.aiw.events.Subject;
 import dev.aiw.governance.AuditLog;
 import dev.aiw.memory.MemoryService;
 import dev.aiw.modelgateway.ChatTurn;
+import dev.aiw.modelgateway.ModelRequest;
 import dev.aiw.organization.Agent;
 import dev.aiw.organization.AgentService;
 import dev.aiw.shared.Actor;
@@ -41,6 +42,11 @@ import tools.jackson.databind.json.JsonMapper;
  */
 @Service
 public class MeetingService {
+    /** A participant with nothing new to add answers this and the meeting moves on. */
+    static final String PASS = "PASS";
+    /** Earlier contributions are clipped to this many characters in later turns' prompts. */
+    private static final int CLIPPED_TURN = 300;
+
     static final String TURN = "MEETING_TURN";
     static final String SYNTHESIS = "MEETING_SYNTHESIS";
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
@@ -193,25 +199,31 @@ public class MeetingService {
 
                 It is your turn (round %d of %d). Contribute from your role as %s: what you will own, the concerns, \
                 risks and dependencies you see, proposals, and questions for specific people. Disagree openly when you \
-                disagree. %s Keep it under 250 words, plain text, no preamble.""".formatted(
+                disagree. Do not repeat what was already said. %s Keep it under 200 words, plain text, no preamble.""".formatted(
                 m.title(), byId.get(m.organizerId()).name(), m.agenda(),
                 people.stream().map(id -> byId.get(id).name() + " (" + byId.get(id).title() + ")")
                         .collect(Collectors.joining(", ")),
-                transcript(m.threadId(), byId), round, m.rounds(), agent.title(),
+                transcript(m.threadId(), byId, people.size()), round, m.rounds(), agent.title(),
                 agent.id().equals(m.organizerId()) && round == 1
                         ? "As the organizer, open the meeting: state its goal and what you expect from each person."
-                        : "");
-        String text = runner.complete(job, agent, runner.context(agent, m.title() + " " + m.agenda()),
-                List.of(new ChatTurn(ChatTurn.Role.USER, prompt)), 2_000, "medium",
-                "Meeting turn — " + m.title());
+                        : round > 1 ? "If you have nothing new to add, reply with exactly " + PASS + "." : "");
+        // Each participant repeats the same context every round: cache it only when there are several rounds.
+        AgentRunner.Context context = runner.context(agent, m.title() + " " + m.agenda());
+        String reply = runner.complete(job, agent, m.rounds() > 1 ? context : context.oneShot(),
+                List.of(new ChatTurn(ChatTurn.Role.USER, prompt)), 1_000, "low",
+                "Meeting turn — " + m.title()).strip();
+        boolean passed = reply.equalsIgnoreCase(PASS) || reply.equalsIgnoreCase(PASS + ".");
+        String text = passed ? "(nothing to add)" : reply;
         tx.executeWithoutResult(s -> {
             Meeting current = find(m.id()).orElseThrow();
             if (!"IN_PROGRESS".equals(current.status()) || current.currentRound() != round || current.turnIndex() != index) {
                 return;
             }
-            collaboration.post(m.threadId(), Actor.agent(agent.id()), null, "CONTRIBUTION", text.strip());
-            memory.record(m.workspaceId(), m.projectId(), agent.id(), null, "NOTE", "My contribution to " + m.title(),
-                    text.strip(), "MEETING", m.id(), Actor.agent(agent.id()));
+            collaboration.post(m.threadId(), Actor.agent(agent.id()), null, "CONTRIBUTION", text);
+            if (!passed) {
+                memory.record(m.workspaceId(), m.projectId(), agent.id(), null, "NOTE", "My contribution to " + m.title(),
+                        text, "MEETING", m.id(), Actor.agent(agent.id()));
+            }
             boolean lastInRound = index + 1 >= people.size();
             if (!lastInRound) {
                 advance(m, round, index + 1, people.get(index + 1), TURN);
@@ -260,10 +272,11 @@ public class MeetingService {
                  "decisions": [{"title": "short", "detail": "what was decided and why"}],
                  "disagreements": [{"topic": "...", "positions": "who thinks what"}],
                  "actionItems": [{"title": "imperative sentence", "owner": "exact participant name or null", "due": "free text or null"}]}
-                Owners must be one of: %s.""".formatted(m.title(), m.agenda(), transcript(m.threadId(), byId),
+                Owners must be one of: %s.""".formatted(m.title(), m.agenda(), transcript(m.threadId(), byId, Integer.MAX_VALUE),
                 byId.values().stream().map(Agent::name).collect(Collectors.joining(", ")));
-        JsonNode minutes = runner.completeJson(job, organizer, runner.context(organizer, m.title() + " " + m.agenda()),
-                prompt, 8_000, "high", "Minutes — " + m.title(), node -> {
+        // Extraction from the transcript: the economy model, no specification (docs/09).
+        JsonNode minutes = runner.completeJson(job, organizer, runner.context(organizer, m.title() + " " + m.agenda(), 0, 0).oneShot(),
+                prompt, 4_000, "low", ModelRequest.Tier.LIGHT, "Minutes — " + m.title(), node -> {
                     if (!node.path("summary").isString()) throw new AgentRunner.InvalidOutput("\"summary\" must be a string.");
                     for (JsonNode item : node.path("actionItems")) {
                         String owner = item.path("owner").isString() ? item.path("owner").asString() : null;
@@ -352,9 +365,15 @@ public class MeetingService {
         if (!elsewhere && !"BLOCKED".equals(agent.activity())) agents.setResting(agentId, "AVAILABLE", null);
     }
 
-    private String transcript(String threadId, Map<String, Agent> byId) {
+    /**
+     * Meeting transcript. The last {@code fullTurns} contributions (the latest round) are kept whole; earlier ones are
+     * clipped to their opening, which keeps each turn's prompt from growing with the whole meeting (docs/09).
+     */
+    private String transcript(String threadId, Map<String, Agent> byId, int fullTurns) {
         StringBuilder sb = new StringBuilder();
-        for (Message msg : collaboration.messages(threadId)) {
+        List<Message> all = collaboration.messages(threadId);
+        for (int i = 0; i < all.size(); i++) {
+            Message msg = all.get(i);
             String who = switch (msg.authorKind()) {
                 case "AGENT" -> {
                     Agent a = byId.get(msg.authorId());
@@ -363,7 +382,10 @@ public class MeetingService {
                 case "HUMAN" -> "CTO (human)";
                 default -> "Platform";
             };
-            sb.append("[").append(who).append("]\n").append(msg.content()).append("\n\n");
+            String content = msg.content();
+            boolean recent = i >= all.size() - fullTurns || "HUMAN".equals(msg.authorKind());
+            if (!recent && content.length() > CLIPPED_TURN) content = content.substring(0, CLIPPED_TURN) + " […]";
+            sb.append("[").append(who).append("]\n").append(content).append("\n\n");
         }
         return sb.isEmpty() ? "(nobody has spoken yet)\n" : sb.toString();
     }

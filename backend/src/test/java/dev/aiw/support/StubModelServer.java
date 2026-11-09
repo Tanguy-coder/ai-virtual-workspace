@@ -29,6 +29,9 @@ public class StubModelServer implements AutoCloseable {
                  "choices":[{"index":0,"message":{"role":"assistant","content":"Hello from stub"},"finish_reason":"stop"}],
                  "usage":{"prompt_tokens":1000,"completion_tokens":500,"total_tokens":1500}}
                 """));
+        server.createContext("/v1/models", ex -> respond(ex, body -> """
+                {"object":"list","data":[{"id":"stub-large","object":"model"},{"id":"models/stub-small","object":"model"}]}
+                """));
         server.createContext("/v1/messages", ex -> respond(ex, body -> """
                 {"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5",
                  "content":[{"type":"text","text":%s}],"stop_reason":"end_turn","stop_sequence":null,

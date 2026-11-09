@@ -61,11 +61,14 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
       return p.from ? `${p.from} replied` : `Message sent to ${p.to}`;
     case "message.failed": return `Message to ${agent} failed: ${p.error}`;
     case "model.call_completed":
+      if (p.outcome === "REUSED") return `${p.model} answer reused from an identical earlier call · no tokens spent`;
       return `${p.model} call ${String(p.outcome).toLowerCase()} · ${p.inputTokens} in / ${p.outputTokens} out` +
+        (Number(p.cacheReadTokens) > 0 ? ` · ${p.cacheReadTokens} from cache` : "") +
         (p.costUsd ? ` · $${Number(p.costUsd).toFixed(4)}` : " · unpriced") + ` · ${p.latencyMs} ms`;
     case "budget.threshold_reached": return `Budget ${p.limit} limit at ${p.threshold} ($${p.spentUsd} of $${p.limitUsd})`;
     case "provider.created": return `Provider "${p.name}" added`;
     case "provider.deleted": return `Provider "${p.name}" removed`;
+    case "provider.updated": return p.economyModel ? `Economy model set to ${p.economyModel}` : "Economy model cleared";
     case "approval.requested": return `Approval requested: ${p.summary}`;
     case "approval.granted": return `Approved: ${p.action}`;
     case "approval.denied": return `Rejected: ${p.action}`;

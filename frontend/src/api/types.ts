@@ -30,6 +30,16 @@ export type ProviderKind = "ANTHROPIC" | "OPENAI_COMPATIBLE";
 export interface Provider {
   id: string; workspaceId: string; kind: ProviderKind; name: string; baseUrl: string | null; hasKey: boolean;
   createdAt: string;
+  /** Model for light calls (minutes, summaries); null: each agent's own model. */
+  economyModel: string | null;
+  /** Model bound to new agents while this provider is the workspace default. */
+  defaultModel: string | null;
+  isDefault: boolean;
+  preset: string | null;
+}
+export interface ProviderPreset {
+  id: string; label: string; kind: ProviderKind; baseUrl: string | null; keyRequired: boolean; local: boolean;
+  defaultModel: string | null; economyModel: string | null; keyUrl: string | null;
 }
 export interface Price {
   providerKind: ProviderKind; model: string; inputUsdPerMtok: number; outputUsdPerMtok: number; builtin: boolean;

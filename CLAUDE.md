@@ -33,6 +33,7 @@ Scope is the **complete product**, not an MVP. It is delivered in 6 increments (
 
 - Every state change publishes a row in `events` inside the same transaction (`EventPublisher.publish`, `Propagation.MANDATORY`). `OutboxRelay` moves it to the Redis stream `aiw:events`; `EventBroadcaster` pushes it to STOMP topic `/topic/workspace.{id}`. The UI only animates/derives state from these events.
 - Sensitive or notable actions also go to `AuditLog.record` (hash-chained, append-only via DB trigger).
+- Providers: Anthropic adapter plus one OpenAI-compatible adapter that serves every preset in `ProviderPresets` (OpenAI, Gemini, Mistral, DeepSeek, xAI, Groq, Together, OpenRouter, Ollama, LM Studio, custom). Model ids are never hard-coded for them: the UI lists what the provider reports (`GET .../providers/{id}/models`). The workspace default provider (`is_default`) and its `default_model` are bound to new agents; `economy_model` serves light calls.
 - All model calls go through `ModelGateway.complete` (budget check, provider key from `SecretVault`, usage + cost + `model.call_completed` event). Never call a provider directly.
 - Tenant data access must go through `WorkspaceAccess.require*`; non-members get 404.
 - Persistence is plain `JdbcClient` SQL; schema in `backend/src/main/resources/db/migration` (Flyway). V1/V2 are not yet released anywhere, but from now on add new migrations instead of editing old ones.
@@ -75,6 +76,7 @@ Do not generate the full codebase before the design is established and validated
 - **Objective validation.** An agent never declares work done by itself. Completion requires tests run and passing, review done, acceptance criteria met, and no critical blockers.
 - **No silent overwrites.** Agents work on branches, with merge rules, review, and conflict detection, and every change is traceable.
 - **Security by design.** Use granular permissions, sandboxed (Docker) execution, secure secret management, quotas and cost limits, and an audit log. These actions require explicit human approval: deleting important files, changing sensitive config, accessing production, releasing, deploying, deleting branches, and modifying sensitive data.
+- **Token sobriety** (user requirement, 2026-11-09): use as few model tokens as possible while staying effective. The code decides and the model only judges. Keep context minimal and the stable prefix cached, use rolling summaries, pick the model class per call type, keep outputs terse (patches, not whole files), and memoize calls. See `docs/09-sobriete-tokens.md`.
 - Simulated agent "years of experience" is profile flavor, not a claim about the model.
 - Architecture should be modular. Avoid both a disorganized monolith and microservices that aren't justified.
 

@@ -175,7 +175,7 @@ public class LeadService {
                 {"summary": "...", "functional": ["..."], "nonFunctional": ["..."], "domains": ["..."],
                  "risks": [{"risk": "...", "impact": "LOW|MEDIUM|HIGH", "mitigation": "..."}],
                  "questions": [{"text": "...", "why": "..."}]}""";
-        JsonNode out = runner.completeJson(job, lead, runner.context(lead, "specification analysis requirements risks"),
+        JsonNode out = runner.completeJson(job, lead, runner.context(lead, "specification analysis requirements risks", AgentRunner.FULL_SPEC, 6_000).oneShot(),
                 prompt, 12_000, "high", "Specification analysis", node -> {
                     if (!node.path("summary").isString() || node.path("summary").asString().isBlank()) {
                         throw new AgentRunner.InvalidOutput("\"summary\" is required.");
@@ -318,7 +318,7 @@ public class LeadService {
                 Departments: DIRECTION, ARCHITECTURE, PRODUCT, BACKEND, FRONTEND, QA, SECURITY, DEVOPS, OTHER.
                 Seniority: JUNIOR, MID, SENIOR, PRINCIPAL.""".formatted(json.writeValueAsString(b.analysis()),
                 qa.isEmpty() ? "(no questions were needed)\n" : qa.toString(), roles, revision);
-        JsonNode out = runner.completeJson(job, lead, runner.context(lead, "architecture team"), prompt, 24_000, "high",
+        JsonNode out = runner.completeJson(job, lead, runner.context(lead, "architecture team requirements security deployment", 16_000, 6_000).oneShot(), prompt, 24_000, "high",
                 revisionOf == null ? "Architecture and team proposal" : "Revised team proposal", node -> {
                     if (!node.path("architecture").isString() || node.path("architecture").asString().isBlank()) {
                         throw new AgentRunner.InvalidOutput("\"architecture\" is required.");
@@ -394,8 +394,8 @@ public class LeadService {
 
     private BigDecimal estimateDaily(String workspaceId, List<Map<String, Object>> lines) {
         Optional<Provider> provider = providers.defaultProvider(workspaceId);
-        if (provider.isEmpty()) return null;
-        return pricing.find(workspaceId, provider.get().kind(), ProviderService.DEFAULT_ANTHROPIC_MODEL)
+        if (provider.isEmpty() || provider.get().defaultModel() == null) return null;
+        return pricing.find(workspaceId, provider.get().kind(), provider.get().defaultModel())
                 .map(p -> PricingService.cost(p, EST_INPUT_TOKENS, EST_OUTPUT_TOKENS)
                         .multiply(BigDecimal.valueOf(lines.stream().mapToInt(l -> (Integer) l.get("count")).sum()))
                         .setScale(2, RoundingMode.HALF_UP))
@@ -582,7 +582,7 @@ public class LeadService {
                 {"tasks": [{"ref": "t1", "title": "...", "description": "...", "acceptanceCriteria": ["..."],
                             "dependsOn": [], "assignee": "Name", "estimateDays": 2, "priority": "HIGH", "brief": "..."}]}"""
                 .formatted(json.writeValueAsString(kickoff.minutes()), people);
-        JsonNode out = runner.completeJson(job, lead, runner.context(lead, "architecture decisions plan tasks"), prompt,
+        JsonNode out = runner.completeJson(job, lead, runner.context(lead, "architecture decisions plan tasks deliverables", 8_000, 8_000).oneShot(), prompt,
                 32_000, "high", "Project plan and task assignment", node -> validatePlan(node, byName));
         tx.executeWithoutResult(s -> {
             if (tasks.hasPlanFrom(job.projectId(), meetingId)) return;

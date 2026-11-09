@@ -3,6 +3,7 @@ import { Plus, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import { api } from "../api/client";
+import { useProviderModels } from "../lib/providers";
 import type { Agent, Department, Provider, RoleTemplate } from "../api/types";
 import { AgentAvatar, DEPARTMENT_COLORS, DEPARTMENT_LABELS } from "../components/AgentAvatar";
 import { Badge, Button, Card, Empty, ErrorText, Field, Input, PageHeader, Select, SkeletonRows, Table, Textarea } from "../components/ui";
@@ -109,7 +110,12 @@ function HireForm({ template, workspaceId, projectId, onClose }: { template: Rol
   const [skills, setSkills] = useState(template.skills.join(", "));
   const [responsibilities, setResponsibilities] = useState(template.responsibilities.join("\n"));
   const [providerId, setProviderId] = useState("");
-  const [model, setModel] = useState("claude-opus-5-5");
+  const [model, setModel] = useState("");
+  const providerModels = useProviderModels(workspaceId, providerId || null);
+  const pickProvider = (id: string) => {
+    setProviderId(id);
+    setModel(providers.data?.find((p) => p.id === id)?.defaultModel ?? "");
+  };
 
   const hire = useMutation({
     mutationFn: () => api.post<Agent>(`/api/v1/projects/${projectId}/agents`, {
@@ -164,12 +170,15 @@ function HireForm({ template, workspaceId, projectId, onClose }: { template: Rol
         <Field label="Responsibilities" hint="One per line."><Textarea rows={4} value={responsibilities} onChange={(e) => setResponsibilities(e.target.value)} /></Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Provider">
-            <Select value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+            <Select value={providerId} onChange={(e) => pickProvider(e.target.value)}>
               <option value="">Workspace default</option>
               {providers.data?.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
           </Field>
-          <Field label="Model"><Input value={model} disabled={!providerId} onChange={(e) => setModel(e.target.value)} /></Field>
+          <Field label="Model">
+            <Input list="hire-models" value={model} disabled={!providerId} onChange={(e) => setModel(e.target.value)} placeholder="model id" />
+            <datalist id="hire-models">{providerModels.data?.map((m) => <option key={m} value={m} />)}</datalist>
+          </Field>
         </div>
         <ErrorText error={hire.error} />
         <Button variant="signal" className="w-full" disabled={hire.isPending || lines(skills).length === 0} onClick={() => hire.mutate()}>

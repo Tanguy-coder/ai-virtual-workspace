@@ -3,12 +3,12 @@ import { GitFork, Link2, ListChecks, Plus, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../api/client";
-import type { Agent, Priority, Task } from "../api/types";
+import type { Agent, Priority, Task, TaskStatus } from "../api/types";
 import { AgentAvatar, DEPARTMENT_COLORS } from "../components/AgentAvatar";
 import { Badge, Button, Card, Dot, Empty, ErrorText, Field, Input, PageHeader, Segmented, Select, Textarea } from "../components/ui";
 import { byId, useAgents, useTasks } from "../lib/queries";
 import { useSelection } from "../lib/selection";
-import { COLUMNS, PRIORITY_TONE, schedule, STATUS_TONE, statusLabel } from "../lib/tasks";
+import { COLUMNS, dropAction, PRIORITY_TONE, schedule, STATUS_TONE, statusLabel, type DropAction } from "../lib/tasks";
 
 type View = "kanban" | "list" | "timeline" | "graph";
 
@@ -56,7 +56,7 @@ export function TasksPage() {
         </Empty>
       )}
 
-      {visible.length > 0 && view === "kanban" && <Kanban tasks={visible} agents={agentsById} />}
+      {visible.length > 0 && view === "kanban" && <Kanban tasks={visible} agents={agentsById} allTasks={tasks.data ?? []} />}
       {visible.length > 0 && view === "list" && <TaskList tasks={visible} agents={agentsById} all={tasks.data ?? []} />}
       {visible.length > 0 && view === "timeline" && <Timeline tasks={tasks.data ?? []} highlight={assignee} agents={agentsById} />}
       {visible.length > 0 && view === "graph" && <Graph tasks={tasks.data ?? []} highlight={assignee} agents={agentsById} />}
@@ -64,12 +64,16 @@ export function TasksPage() {
   );
 }
 
-function TaskCard({ task, agent, all }: { task: Task; agent?: Agent; all?: Record<string, Task> }) {
+function TaskCard({ task, agent, all, draggable = false, onDragStart, onDragEnd }: {
+  task: Task; agent?: Agent; all?: Record<string, Task>; draggable?: boolean; onDragStart?: () => void; onDragEnd?: () => void;
+}) {
   const openTask = useSelection((s) => s.openTask);
   const waiting = all ? task.dependsOn.filter((d) => all[d] && all[d].status !== "DONE").length : 0;
   return (
-    <button onClick={() => openTask(task.id)}
-      className="group w-full rounded-md border border-line bg-panel-solid p-3 text-left transition hover:border-line-strong">
+    <button onClick={() => openTask(task.id)} draggable={draggable}
+      onDragStart={(e) => { e.dataTransfer.setData("text/task-id", task.id); e.dataTransfer.effectAllowed = "move"; onDragStart?.(); }}
+      onDragEnd={onDragEnd}
+      className={`group w-full rounded-md border border-line bg-panel-solid p-3 text-left transition hover:border-line-strong ${draggable ? "cursor-grab active:cursor-grabbing" : ""}`}>
       <div className="flex items-center justify-between gap-2">
         <span className="tabular text-[11px] font-semibold text-faint">T-{task.number}</span>
         <Badge tone={PRIORITY_TONE[task.priority]}>{task.priority.toLowerCase()}</Badge>
@@ -86,26 +90,151 @@ function TaskCard({ task, agent, all }: { task: Task; agent?: Agent; all?: Recor
   );
 }
 
-function Kanban({ tasks, agents }: { tasks: Task[]; agents: Record<string, Agent> }) {
-  const all = byId(tasks);
+const MOVABLE: TaskStatus[] = ["CREATED", "READY", "ASSIGNED", "BLOCKED"];
+
+/** A drop that needs one more answer: who (assign), why (block) or a confirmation (cancel). */
+type Pending = { task: Task; action: Extract<DropAction, { kind: "assign" | "block" | "cancel" }> };
+
+function Kanban({ tasks, agents, allTasks }: { tasks: Task[]; agents: Record<string, Agent>; allTasks: Task[] }) {
+  const all = byId(allTasks);
+  const queryClient = useQueryClient();
+  const [dragging, setDragging] = useState<Task | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
+  const run = useMutation({
+    mutationFn: async ({ task, steps }: { task: Task; steps: { path: string; method: "post" | "put"; body?: unknown }[] }) => {
+      for (const st of steps) {
+        const url = `/api/v1/tasks/${task.id}${st.path}`;
+        await (st.method === "put" ? api.put(url, st.body ?? {}) : api.post(url, st.body ?? {}));
+      }
+    },
+    onSuccess: (_d, v) => {
+      setPending(null);
+      queryClient.invalidateQueries({ queryKey: ["tasks", v.task.projectId] });
+      queryClient.invalidateQueries({ queryKey: ["task", v.task.id] });
+    },
+    onError: (e) => setNotice((e as Error).message),
+  });
+
+  function drop(task: Task, target: TaskStatus | "CANCELLED") {
+    setOver(null);
+    setDragging(null);
+    const unfinished = task.dependsOn.filter((d) => all[d] && all[d].status !== "DONE").length;
+    const a = dropAction(task, target, unfinished);
+    if (a.kind === "none") return;
+    if (a.kind === "refuse") return setNotice(a.reason);
+    setNotice(null);
+    if (a.kind === "unassign") return run.mutate({ task, steps: [{ path: "/assignee", method: "put", body: { agentId: null } }] });
+    if (a.kind === "unblock") return run.mutate({ task, steps: [{ path: "/unblock", method: "post" }] });
+    setPending({ task, action: a });
+  }
+
+  const zone = (key: string, target: TaskStatus | "CANCELLED") => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!dragging) return;
+      e.preventDefault();
+      setOver(key);
+    },
+    onDragLeave: () => setOver((o) => (o === key ? null : o)),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      const task = all[e.dataTransfer.getData("text/task-id")];
+      if (task) drop(task, target);
+    },
+  });
+
   return (
-    <div className="-mx-1 flex gap-3 overflow-x-auto px-1 pb-4">
-      {COLUMNS.map((c) => {
-        const items = tasks.filter((t) => t.status === c.status);
-        return (
-          <section key={c.status} className="flex w-72 shrink-0 flex-col rounded-md bg-panel-2/60">
-            <header className="flex items-center gap-2 px-3 py-2.5">
-              <Dot tone={STATUS_TONE[c.status]} />
-              <h3 className="text-[12px] font-semibold">{c.label}</h3>
-              <span className="tabular ml-auto text-[11px] text-faint">{items.length}</span>
-            </header>
-            <div className="flex min-h-24 flex-col gap-2 px-2 pb-2">
-              {items.map((t) => <TaskCard key={t.id} task={t} agent={t.assigneeId ? agents[t.assigneeId] : undefined} all={all} />)}
-              {items.length === 0 && c.future && <p className="px-1.5 py-3 text-[11px] leading-relaxed text-faint">{c.future}</p>}
-            </div>
-          </section>
-        );
-      })}
+    <div>
+      {notice && (
+        <div role="status" className="mb-3 flex items-start gap-2 rounded-md border border-line-strong bg-panel px-3 py-2 text-[13px]">
+          <span className="flex-1">{notice}</span>
+          <button onClick={() => setNotice(null)} aria-label="Dismiss" className="text-muted hover:text-fg"><X size={14} /></button>
+        </div>
+      )}
+      <p className="mb-2 text-[12px] text-faint">Drag a card to assign, unassign, block, unblock or cancel it. The later columns follow real work only.</p>
+      <div className="-mx-1 flex gap-3 overflow-x-auto px-1 pb-4">
+        {COLUMNS.map((c) => {
+          const items = tasks.filter((t) => t.status === c.status);
+          const target = dragging ? dropAction(dragging, c.status, dragging.dependsOn.filter((d) => all[d] && all[d].status !== "DONE").length) : null;
+          const accepts = target && target.kind !== "refuse" && target.kind !== "none";
+          return (
+            <section key={c.status} {...zone(c.status, c.status)}
+              className={`flex w-72 shrink-0 flex-col rounded-md transition ${over === c.status ? (accepts ? "bg-accent/10 ring-1 ring-accent" : "bg-danger/5 ring-1 ring-danger/40") : dragging && accepts ? "bg-panel-2 ring-1 ring-line-strong" : "bg-panel-2/60"}`}>
+              <header className="flex items-center gap-2 px-3 py-2.5">
+                <Dot tone={STATUS_TONE[c.status]} />
+                <h3 className="text-[12px] font-semibold">{c.label}</h3>
+                <span className="tabular ml-auto text-[11px] text-faint">{items.length}</span>
+              </header>
+              <div className="flex min-h-24 flex-col gap-2 px-2 pb-2">
+                {items.map((t) => (
+                  <TaskCard key={t.id} task={t} agent={t.assigneeId ? agents[t.assigneeId] : undefined} all={all}
+                    draggable={MOVABLE.includes(t.status)} onDragStart={() => setDragging(t)} onDragEnd={() => { setDragging(null); setOver(null); }} />
+                ))}
+                {items.length === 0 && c.future && <p className="px-1.5 py-3 text-[11px] leading-relaxed text-faint">{c.future}</p>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      {dragging && (
+        <div {...zone("cancel", "CANCELLED")}
+          className={`fixed bottom-6 left-1/2 z-30 -translate-x-1/2 rounded-md border border-dashed px-5 py-3 text-[13px] ${over === "cancel" ? "border-danger bg-danger/10 text-danger" : "border-line-strong bg-panel text-muted"}`}>
+          Drop here to cancel T-{dragging.number}
+        </div>
+      )}
+      {pending && <DropDialog pending={pending} agents={Object.values(agents)} busy={run.isPending} error={run.error}
+        onCancel={() => setPending(null)}
+        onConfirm={(value) => {
+          const { task, action } = pending;
+          if (action.kind === "assign") {
+            run.mutate({ task, steps: [...(action.unblockFirst ? [{ path: "/unblock", method: "post" as const }] : []),
+              { path: "/assignee", method: "put", body: { agentId: value } }] });
+          } else if (action.kind === "block") {
+            run.mutate({ task, steps: [{ path: "/block", method: "post", body: { reason: value } }] });
+          } else {
+            run.mutate({ task, steps: [{ path: "/cancel", method: "post" }] });
+          }
+        }} />}
+    </div>
+  );
+}
+
+function DropDialog({ pending, agents, busy, error, onCancel, onConfirm }: {
+  pending: Pending; agents: Agent[]; busy: boolean; error: unknown; onCancel(): void; onConfirm(value: string): void;
+}) {
+  const { task, action } = pending;
+  const [value, setValue] = useState(action.kind === "assign" ? task.assigneeId ?? "" : "");
+  const title = action.kind === "assign" ? `Assign T-${task.number}` : action.kind === "block" ? `Block T-${task.number}` : `Cancel T-${task.number}?`;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={onCancel}>
+      <form role="dialog" aria-label={title} onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => { e.preventDefault(); onConfirm(value); }}
+        className="w-full max-w-sm rounded-md border border-line-strong bg-panel p-4">
+        <p className="text-[14px] font-semibold">{title}</p>
+        <p className="mt-0.5 text-[13px] text-muted">{task.title}</p>
+        <div className="mt-3">
+          {action.kind === "assign" && (
+            <Field label="Assignee">
+              <Select autoFocus required value={value} onChange={(e) => setValue(e.target.value)}>
+                <option value="">Choose…</option>
+                {agents.filter((a) => a.status === "ACTIVE").map((a) => <option key={a.id} value={a.id}>{a.name} · {a.title}</option>)}
+              </Select>
+            </Field>
+          )}
+          {action.kind === "block" && (
+            <Field label="Why is it blocked?"><Textarea autoFocus required rows={3} value={value} onChange={(e) => setValue(e.target.value)} /></Field>
+          )}
+          {action.kind === "cancel" && <p className="text-[13px]">The task leaves the board. Its history is kept.</p>}
+        </div>
+        <ErrorText error={error} />
+        <div className="mt-4 flex justify-end gap-2">
+          <Button type="button" variant="subtle" onClick={onCancel}>Back</Button>
+          <Button type="submit" variant={action.kind === "cancel" ? "danger" : "primary"} disabled={busy || (action.kind !== "cancel" && !value.trim())}>
+            {action.kind === "assign" ? "Assign" : action.kind === "block" ? "Block" : "Cancel task"}
+          </Button>
+        </div>
+      </form>
     </div>
   );
 }

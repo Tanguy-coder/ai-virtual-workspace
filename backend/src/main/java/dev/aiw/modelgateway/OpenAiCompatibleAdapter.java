@@ -45,8 +45,10 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
             throw new ModelCallException("This provider has no base URL configured", 0, null);
         }
         List<Map<String, String>> messages = new ArrayList<>();
-        if (request.system() != null && !request.system().isBlank()) {
-            messages.add(Map.of("role", "system", "content", request.system()));
+        // Stable prefix first: OpenAI-compatible providers cache identical prompt prefixes automatically.
+        String system = request.fullSystem();
+        if (system != null) {
+            messages.add(Map.of("role", "system", "content", system));
         }
         for (ChatTurn turn : request.turns()) {
             messages.add(Map.of("role", turn.role() == ChatTurn.Role.USER ? "user" : "assistant", "content", turn.text()));
@@ -73,13 +75,40 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
         }
         JsonNode choice = response.path("choices").get(0);
         String finish = choice.path("finish_reason").asString("unknown");
+        long prompt = response.path("usage").path("prompt_tokens").asLong(0);
+        long cached = Math.min(prompt, response.path("usage").path("prompt_tokens_details").path("cached_tokens").asLong(0));
         return new AdapterResult(
                 choice.path("message").path("content").asString(""),
                 response.path("model").asString(request.model()),
-                response.path("usage").path("prompt_tokens").asLong(0),
+                prompt - cached,
                 response.path("usage").path("completion_tokens").asLong(0),
                 "content_filter".equals(finish),
-                finish);
+                finish, 0, cached);
+    }
+
+    @Override
+    public List<String> listModels(String providerId, String baseUrl, String apiKey) {
+        if (baseUrl == null || baseUrl.isBlank()) {
+            throw new ModelCallException("This provider has no base URL configured", 0, null);
+        }
+        JsonNode response;
+        try {
+            var spec = http.get().uri(baseUrl.replaceAll("/+$", "") + "/models");
+            if (apiKey != null && !apiKey.isBlank()) spec.header("Authorization", "Bearer " + apiKey);
+            response = spec.retrieve().body(JsonNode.class);
+        } catch (RestClientResponseException e) {
+            throw new ModelCallException("Provider error " + e.getStatusCode().value() + ": "
+                    + abbreviate(e.getResponseBodyAsString()), e.getStatusCode().value(), e);
+        } catch (RestClientException e) {
+            throw new ModelCallException("Could not reach the provider: " + e.getMessage(), 0, e);
+        }
+        List<String> ids = new ArrayList<>();
+        // OpenAI shape {"data": [{"id": ...}]}; Gemini's compatibility layer prefixes ids with "models/".
+        for (JsonNode m : response == null ? JSON.createArrayNode() : response.path("data")) {
+            String id = m.path("id").asString("");
+            if (!id.isBlank()) ids.add(id.startsWith("models/") ? id.substring("models/".length()) : id);
+        }
+        return ids.stream().distinct().sorted().toList();
     }
 
     private static String abbreviate(String s) {

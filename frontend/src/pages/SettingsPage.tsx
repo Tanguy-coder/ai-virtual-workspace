@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { BudgetView, Price, Project, Provider, ProviderKind, TestResult } from "../api/types";
 import { Badge, Button, Card, ErrorText, Field, Input, PageHeader } from "../components/ui";
 import { usd } from "../lib/format";
+import { usePresets, useProviderModels } from "../lib/providers";
 
 export function SettingsPage() {
   const { workspaceId = "" } = useParams();
@@ -27,12 +28,14 @@ export function SettingsPage() {
 function Providers({ workspaceId }: { workspaceId: string }) {
   const queryClient = useQueryClient();
   const providers = useQuery({ queryKey: ["providers", workspaceId], queryFn: () => api.get<Provider[]>(`/api/v1/workspaces/${workspaceId}/providers`) });
-  const [kind, setKind] = useState<ProviderKind>("ANTHROPIC");
+  const presets = usePresets();
+  const [presetId, setPresetId] = useState("anthropic");
+  const preset = presets.data?.find((p) => p.id === presetId);
   const [name, setName] = useState("Anthropic");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const create = useMutation({
-    mutationFn: () => api.post(`/api/v1/workspaces/${workspaceId}/providers`, { kind, name, baseUrl: baseUrl || null, apiKey: apiKey || null }),
+    mutationFn: () => api.post(`/api/v1/workspaces/${workspaceId}/providers`, { preset: presetId, name, baseUrl: baseUrl || null, apiKey: apiKey || null }),
     onSuccess: () => {
       setApiKey("");
       queryClient.invalidateQueries({ queryKey: ["providers", workspaceId] });
@@ -43,6 +46,13 @@ function Providers({ workspaceId }: { workspaceId: string }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["providers", workspaceId] }),
   });
 
+  function pick(id: string) {
+    const p = presets.data?.find((x) => x.id === id);
+    setPresetId(id);
+    setName(p ? p.label.replace(/ \(.*\)$/, "") : "");
+    setBaseUrl(p?.baseUrl ?? "");
+  }
+
   function submit(e: FormEvent) {
     e.preventDefault();
     create.mutate();
@@ -51,7 +61,8 @@ function Providers({ workspaceId }: { workspaceId: string }) {
   return (
     <Card title="AI providers">
       <p className="mb-4 text-[13px] text-muted">
-        Keys are encrypted at rest and never shown again. Your keys, your costs: calls are billed by the provider.
+        Use any provider: Anthropic, OpenAI, Google Gemini, Mistral, DeepSeek, xAI, Groq, OpenRouter, or local models
+        (Ollama, LM Studio). Keys are encrypted at rest and never shown again. Your keys, your costs: the provider bills the calls.
       </p>
       <ul className="mb-5 space-y-2">
         {providers.data?.map((p) => <ProviderRow key={p.id} provider={p} workspaceId={workspaceId} onDelete={() => remove.mutate(p.id)} />)}
@@ -59,23 +70,25 @@ function Providers({ workspaceId }: { workspaceId: string }) {
       </ul>
       <ErrorText error={remove.error} />
       <form onSubmit={submit} className="grid gap-3 sm:grid-cols-2">
-        <Field label="Type">
-          <select className="h-9 w-full rounded-md border border-line bg-panel-2 px-2 text-[13px]" value={kind}
-            onChange={(e) => { const k = e.target.value as ProviderKind; setKind(k); setName(k === "ANTHROPIC" ? "Anthropic" : "Local models"); }}>
-            <option value="ANTHROPIC">Anthropic (Claude)</option>
-            <option value="OPENAI_COMPATIBLE">OpenAI-compatible API (Ollama, vLLM…)</option>
+        <Field label="Provider">
+          <select className="h-9 w-full rounded-md border border-line bg-panel-2 px-2 text-[13px]" value={presetId} onChange={(e) => pick(e.target.value)}>
+            {presets.data?.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
           </select>
         </Field>
         <Field label="Name"><Input required value={name} onChange={(e) => setName(e.target.value)} /></Field>
-        {kind === "OPENAI_COMPATIBLE" && (
-          <Field label="Base URL" hint="e.g. http://localhost:11434/v1"><Input required value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></Field>
+        {preset?.kind === "OPENAI_COMPATIBLE" && (
+          <Field label="Base URL" hint={preset.local ? "The server must be reachable from the backend" : "OpenAI-compatible endpoint"}>
+            <Input required value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…/v1" />
+          </Field>
         )}
-        <Field label={kind === "ANTHROPIC" ? "API key" : "API key (optional)"}>
-          <Input type="password" autoComplete="off" required={kind === "ANTHROPIC"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+        <Field label={preset?.keyRequired ? "API key" : "API key (optional)"}
+          hint={preset?.keyUrl ? <a className="underline" href={preset.keyUrl} target="_blank" rel="noreferrer">Get a key</a> : undefined}>
+          <Input type="password" autoComplete="off" required={!!preset?.keyRequired} value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
         </Field>
         <div className="sm:col-span-2">
+          <p className="mb-2 text-[12px] text-muted">After adding it, pick its default model from the list the provider reports.</p>
           <ErrorText error={create.error} />
-          <Button type="submit" disabled={create.isPending}>Add provider</Button>
+          <Button type="submit" disabled={create.isPending || !preset}>Add provider</Button>
         </div>
       </form>
     </Card>
@@ -83,26 +96,65 @@ function Providers({ workspaceId }: { workspaceId: string }) {
 }
 
 function ProviderRow({ provider, workspaceId, onDelete }: { provider: Provider; workspaceId: string; onDelete: () => void }) {
-  const [model, setModel] = useState(provider.kind === "ANTHROPIC" ? "claude-opus-5-5" : "");
+  const queryClient = useQueryClient();
+  const presets = usePresets();
+  const label = presets.data?.find((p) => p.id === provider.preset)?.label ?? (provider.kind === "ANTHROPIC" ? "Anthropic" : "OpenAI-compatible");
+  const models = useProviderModels(workspaceId, provider.id);
+  const [defaultModel, setDefaultModel] = useState(provider.defaultModel ?? "");
+  const [economy, setEconomy] = useState(provider.economyModel ?? "");
+  const [model, setModel] = useState(provider.defaultModel ?? "");
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["providers", workspaceId] });
+    queryClient.invalidateQueries({ queryKey: ["agents"] });
+  };
+  const saveModels = useMutation({
+    mutationFn: () => api.put<Provider>(`/api/v1/workspaces/${workspaceId}/providers/${provider.id}/models`,
+      { defaultModel: defaultModel || null, economyModel: economy || null }),
+    onSuccess: invalidate,
+  });
+  const makeDefault = useMutation({
+    mutationFn: () => api.put<Provider>(`/api/v1/workspaces/${workspaceId}/providers/${provider.id}/default`, {}),
+    onSuccess: invalidate,
+  });
   const test = useMutation({
     mutationFn: () => api.post<TestResult>(`/api/v1/workspaces/${workspaceId}/providers/${provider.id}/test`, { model }),
   });
   const r = test.data;
+  const listId = `models-${provider.id}`;
+  const dirty = defaultModel !== (provider.defaultModel ?? "") || economy !== (provider.economyModel ?? "");
   return (
     <li className="rounded-md border border-line p-3">
+      <datalist id={listId}>{models.data?.map((m) => <option key={m} value={m} />)}</datalist>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">{provider.name}</span>
-        <Badge>{provider.kind === "ANTHROPIC" ? "Anthropic" : "OpenAI-compatible"}</Badge>
+        <Badge>{label}</Badge>
+        {provider.isDefault ? <Badge tone="ok">Default for new agents</Badge>
+          : <Button variant="subtle" size="sm" disabled={!provider.defaultModel || makeDefault.isPending} onClick={() => makeDefault.mutate()}
+              title={provider.defaultModel ? undefined : "Choose a default model first"}>Make default</Button>}
         {provider.baseUrl && <span className="font-mono text-[12px] text-muted">{provider.baseUrl}</span>}
-        <span className="ml-auto flex items-center gap-2">
-          <Input className="h-8 w-48" value={model} onChange={(e) => setModel(e.target.value)} placeholder="model id" aria-label="Model to test" />
-          <Button variant="ghost" disabled={!model || test.isPending} onClick={() => test.mutate()}>Test</Button>
-          <Button variant="danger" onClick={onDelete}>Remove</Button>
-        </span>
+        <Button className="ml-auto" variant="danger" size="sm" onClick={onDelete}>Remove</Button>
       </div>
-      {test.isPending && <p className="mt-2 text-[12px] text-muted">Calling {model}… (this is a real, billed call)</p>}
+      <form className="mt-3 grid gap-2 border-t border-line pt-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
+        onSubmit={(e) => { e.preventDefault(); saveModels.mutate(); }}>
+        <Field label="Default model" hint="Bound to new agents when this provider is the default">
+          <Input list={listId} value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} placeholder={models.isLoading ? "Loading models…" : "model id"} />
+        </Field>
+        <Field label="Economy model" hint="Light calls such as meeting minutes; empty: agents' own model">
+          <Input list={listId} value={economy} onChange={(e) => setEconomy(e.target.value)} placeholder="optional" />
+        </Field>
+        <Button variant="ghost" type="submit" disabled={!dirty || saveModels.isPending}>Save models</Button>
+      </form>
+      <p className="mt-1 text-[12px] text-muted">
+        {models.data ? `${models.data.length} models reported by the provider.` : models.isError ? `Model list unavailable: ${(models.error as Error).message}` : ""}
+      </p>
+      <ErrorText error={saveModels.error ?? makeDefault.error} />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <div className="w-64"><Input className="h-8" list={listId} value={model} onChange={(e) => setModel(e.target.value)} placeholder="model to test" aria-label="Model to test" /></div>
+        <Button variant="ghost" size="sm" disabled={!model || test.isPending} onClick={() => test.mutate()}>Test</Button>
+        {test.isPending && <span className="text-[12px] text-muted">Calling {model}… (a real, billed call)</span>}
+      </div>
       {r && (r.ok
-        ? <p className="mt-2 text-[12px] text-ok">Replied "{r.reply}" · {r.servedModel} · {r.inputTokens}/{r.outputTokens} tokens · {r.latencyMs} ms · {r.costUsd ? usd(r.costUsd, 6) : "unpriced"}</p>
+        ? <p className="mt-2 text-[12px] text-ok">Replied "{r.reply}" · {r.servedModel} · {r.inputTokens}/{r.outputTokens} tokens · {r.latencyMs} ms · {r.costUsd ? usd(r.costUsd, 6) : "unpriced: add its price below"}</p>
         : <p className="mt-2 text-[12px] text-danger">{r.error ?? "The model declined the request"}</p>)}
       <ErrorText error={test.error} />
     </li>

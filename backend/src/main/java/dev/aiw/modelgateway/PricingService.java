@@ -54,6 +54,20 @@ public class PricingService {
         }
     }
 
+    /**
+     * Cost with the provider prompt cache: written tokens cost 1.25x the input price (Anthropic), read tokens
+     * {@code readFactor} of it (0.1 on Anthropic; OpenAI-compatible providers vary, 0.5 is assumed).
+     */
+    public static BigDecimal cost(Price price, long inputTokens, long outputTokens, long cacheWrite, long cacheRead,
+                                  BigDecimal readFactor) {
+        BigDecimal input = BigDecimal.valueOf(inputTokens)
+                .add(BigDecimal.valueOf(cacheWrite).multiply(new BigDecimal("1.25")))
+                .add(BigDecimal.valueOf(cacheRead).multiply(readFactor));
+        return price.inputUsdPerMtok().multiply(input)
+                .add(price.outputUsdPerMtok().multiply(BigDecimal.valueOf(outputTokens)))
+                .divide(MILLION, 6, RoundingMode.HALF_UP);
+    }
+
     public static BigDecimal cost(Price price, long inputTokens, long outputTokens) {
         return price.inputUsdPerMtok().multiply(BigDecimal.valueOf(inputTokens))
                 .add(price.outputUsdPerMtok().multiply(BigDecimal.valueOf(outputTokens)))
