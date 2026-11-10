@@ -234,6 +234,24 @@ public class TaskService {
         dependents.forEach(id -> settle(id, Actor.system()));
     }
 
+    /** Moves a task through the execution states (increment 4). Only the execution engine calls this. */
+    void advance(String taskId, String to, Actor actor, Map<String, ?> extra) {
+        Task task = find(taskId).orElseThrow();
+        if (task.status().equals(to) || CLOSED.contains(task.status())) return;
+        setStatus(task, to, actor, extra);
+    }
+
+    /** The validation engine closes the task; dependents whose dependencies are all done become ready. */
+    void complete(String taskId, Actor actor, Map<String, ?> extra) {
+        advance(taskId, "DONE", actor, extra);
+        onTaskDone(taskId);
+    }
+
+    void setCriteria(String taskId, List<Task.Criterion> criteria) {
+        jdbc.sql("UPDATE tasks SET acceptance_criteria = ?::jsonb, updated_at = now() WHERE id = ?")
+                .params(json.writeValueAsString(criteria), taskId).update();
+    }
+
     /** Recomputes CREATED / READY / ASSIGNED from dependencies and assignee. Other states are left alone. */
     void settle(String taskId, Actor actor) {
         Task task = find(taskId).orElseThrow();

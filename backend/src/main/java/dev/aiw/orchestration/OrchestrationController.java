@@ -40,6 +40,13 @@ class OrchestrationController {
     private final MeetingService meetings;
     private final CollaborationService collaboration;
 
+    private TaskExecution execution;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    void setExecution(TaskExecution execution) {
+        this.execution = execution;
+    }
+
     OrchestrationController(WorkspaceAccess access, LeadService lead, TaskService tasks, MeetingService meetings,
                             CollaborationService collaboration) {
         this.access = access;
@@ -197,13 +204,21 @@ class OrchestrationController {
     @PostMapping("/api/v1/tasks/{taskId}/unblock")
     Task unblock(@PathVariable String taskId) {
         Task t = loadTask(taskId, WorkspaceRole.MEMBER);
-        return tasks.unblock(taskId, Actor.human(user(t.projectId())));
+        Actor actor = Actor.human(user(t.projectId()));
+        // A task blocked during its run resumes the run: the agent continues where it stopped.
+        if (execution.hasBlockedRun(taskId)) {
+            execution.resume(taskId, actor);
+            return tasks.find(taskId).orElseThrow();
+        }
+        return tasks.unblock(taskId, actor);
     }
 
     @PostMapping("/api/v1/tasks/{taskId}/cancel")
     Task cancel(@PathVariable String taskId) {
         Task t = loadTask(taskId, WorkspaceRole.MEMBER);
-        return tasks.cancel(taskId, Actor.human(user(t.projectId())));
+        Task cancelled = tasks.cancel(taskId, Actor.human(user(t.projectId())));
+        execution.onCancelled(taskId);
+        return cancelled;
     }
 
     /** Turns a meeting action item into a task, assigned to its owner. */

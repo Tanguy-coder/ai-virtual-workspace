@@ -47,6 +47,7 @@ export function agentState(agent: Pick<Agent, "status" | "activity">): { label: 
   if (agent.status === "DISMISSED") return { label: "Dismissed", tone: "muted", live: false };
   switch (agent.activity) {
     case "THINKING": return { label: "Thinking", tone: "active", live: true };
+    case "WORKING": return { label: "Working on a task", tone: "active", live: true };
     case "AVAILABLE": return { label: "Available", tone: "ok", live: false };
     case "IN_MEETING": return { label: "In meeting", tone: "warn", live: false };
     case "BLOCKED": return { label: "Blocked", tone: "danger", live: false };

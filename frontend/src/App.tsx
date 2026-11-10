@@ -1,5 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Navigate, Route, Routes } from "react-router";
+import { BranchesPage } from "./pages/engineering/BranchesPage";
+import { CodePage } from "./pages/engineering/CodePage";
+import { MergeRequestsPage } from "./pages/engineering/MergeRequestsPage";
+import { RunPage } from "./pages/engineering/RunPage";
+import { RunsPage } from "./pages/engineering/RunsPage";
+import { TestingPage } from "./pages/engineering/TestingPage";
 import { api, ApiError } from "./api/client";
 import type { User, Workspace } from "./api/types";
 import { Shell } from "./components/Shell";
@@ -72,9 +78,13 @@ export function App() {
           <Route path="memory" element={<MemoryPage />} />
           <Route path="meetings" element={<MeetingsPage />} />
           <Route path="meetings/:meetingId" element={<MeetingsPage />} />
-          <Route path="code" element={<NotAvailablePage feature="Code Workspace" increment={4} />} />
-          <Route path="git" element={<NotAvailablePage feature="Git" increment={4} />} />
-          <Route path="testing" element={<NotAvailablePage feature="Testing Center" increment={4} />} />
+          <Route path="runs" element={<RunsPage />} />
+          <Route path="runs/:taskId" element={<RunPage />} />
+          <Route path="merge-requests" element={<MergeRequestsPage />} />
+          <Route path="merge-requests/:mrId" element={<MergeRequestsPage />} />
+          <Route path="code" element={<CodePage />} />
+          <Route path="git" element={<BranchesPage />} />
+          <Route path="testing" element={<TestingPage />} />
           <Route path="security" element={<NotAvailablePage feature="Security Center" increment={5} />} />
           <Route path="deployment" element={<NotAvailablePage feature="Deployment Center" increment={6} />} />
         </Route>

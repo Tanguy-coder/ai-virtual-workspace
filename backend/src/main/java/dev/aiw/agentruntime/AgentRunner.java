@@ -54,7 +54,31 @@ public class AgentRunner {
      * identical across an agent's calls for the same purpose and is cached by the provider; {@code dynamic}
      * (shared memory, own notes) changes as work is recorded.
      */
+    /** Tokens and cost of the calls made while it is {@linkplain #measure installed}, for per-task budgets. */
+    public static final class Usage {
+        public long input, output, cacheRead;
+        public BigDecimal cost = BigDecimal.ZERO;
+    }
+
+    private static final ThreadLocal<Usage> USAGE = new ThreadLocal<>();
+
+    /** Runs {@code work} and adds the usage of every model call it makes to {@code usage}. */
+    public <T> T measure(Usage usage, java.util.function.Supplier<T> work) {
+        Usage previous = USAGE.get();
+        USAGE.set(usage);
+        try {
+            return work.get();
+        } finally {
+            USAGE.set(previous);
+        }
+    }
+
     public record Context(String stable, String dynamic, ModelRequest.Cache cache) {
+        /** The same context with more stable text appended (tool manuals...), still cacheable. */
+        public Context withStable(String more) {
+            return new Context(stable + "\n" + more, dynamic, cache);
+        }
+
         /** The same context for a one-shot call: not worth a cache write. */
         public Context oneShot() {
             return new Context(stable, dynamic, ModelRequest.Cache.NONE);
@@ -196,6 +220,13 @@ public class AgentRunner {
                 record(job, agent, summary, r, duration, err);
                 agents.endThinking(agent.id());
             });
+        }
+        Usage usage = USAGE.get();
+        if (usage != null) {
+            usage.input += result.inputTokens() + result.cacheWriteTokens();
+            usage.output += result.outputTokens();
+            usage.cacheRead += result.cacheReadTokens();
+            if (result.costUsd() != null) usage.cost = usage.cost.add(result.costUsd());
         }
         if (result.refused()) throw new JobFailure("The model declined this request");
         return result;

@@ -25,7 +25,11 @@ public class ApprovalService {
     private final EventPublisher events;
     private final AuditLog audit;
 
-    public ApprovalService(JdbcClient jdbc, JsonMapper json, EventPublisher events, AuditLog audit) {
+    private final org.springframework.context.ApplicationEventPublisher appEvents;
+
+    public ApprovalService(JdbcClient jdbc, JsonMapper json, EventPublisher events, AuditLog audit,
+                           org.springframework.context.ApplicationEventPublisher appEvents) {
+        this.appEvents = appEvents;
         this.jdbc = jdbc;
         this.json = json;
         this.events = events;
@@ -78,6 +82,8 @@ public class ApprovalService {
         audit.record(workspaceId, actor, current.action(), current.targetKind(), current.targetId(),
                 approve ? AuditLog.Decision.APPROVED : AuditLog.Decision.REJECTED,
                 reason == null ? Map.of("approvalId", approvalId) : Map.of("approvalId", approvalId, "reason", reason));
+        appEvents.publishEvent(new ApprovalDecided(workspaceId, current.projectId(), approvalId, current.action(),
+                current.targetKind(), current.targetId(), approve, userId, reason));
         return jdbc.sql("SELECT * FROM approvals WHERE id = ?").param(approvalId).query(this::map).single();
     }
 

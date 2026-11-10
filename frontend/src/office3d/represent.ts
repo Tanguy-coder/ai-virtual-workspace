@@ -16,7 +16,7 @@ export type Posture =
   | "stand"; // standing in a meeting room
 
 /** Desk screen content. "generating" only while a model call runs; "blocked" shows the recorded reason. */
-export type Screen = "off" | "generating" | "blocked";
+export type Screen = "off" | "generating" | "working" | "blocked";
 
 /** State light above the head. */
 export type Lantern = "thinking" | "meeting" | "blocked" | null;
@@ -63,6 +63,8 @@ export function represent(agents: AgentLike[], meetings: OpenMeeting[]): OfficeV
     const seat = seats.get(a.id)!;
     const paused = a.status === "PAUSED";
     const thinking = !paused && a.activity === "THINKING";
+    // Working on a task: a run is open (tools, tests, commits) even between model calls.
+    const working = !paused && a.activity === "WORKING";
     const blocked = !paused && a.activity === "BLOCKED";
     const meeting = paused ? undefined : inRoom.get(a.id);
 
@@ -75,10 +77,10 @@ export function represent(agents: AgentLike[], meetings: OpenMeeting[]): OfficeV
     } else if (seat.overflow) {
       posture = "stand";
     } else {
-      posture = blocked ? "crossed" : thinking ? "type" : "idle";
+      posture = blocked ? "crossed" : thinking || working ? "type" : "idle";
     }
 
-    const lantern: Lantern = paused ? null : blocked ? "blocked" : thinking ? "thinking" : meeting || a.activity === "IN_MEETING" ? "meeting" : null;
+    const lantern: Lantern = paused ? null : blocked ? "blocked" : thinking || working ? "thinking" : meeting || a.activity === "IN_MEETING" ? "meeting" : null;
     figures.push({ agentId: a.id, home: seat.room, spot, posture, lantern, faded: paused, ...stateLabel(a, !!meeting, meeting?.p.speakerId === a.id) });
 
     if (!seat.overflow) {
@@ -86,7 +88,7 @@ export function represent(agents: AgentLike[], meetings: OpenMeeting[]): OfficeV
       desks.push({
         seat,
         occupied: atDesk,
-        screen: !atDesk || paused ? "off" : thinking ? "generating" : blocked ? "blocked" : "off",
+        screen: !atDesk || paused ? "off" : thinking ? "generating" : working ? "working" : blocked ? "blocked" : "off",
         blockedReason: blocked ? a.blockedReason : null,
       });
     }
@@ -99,6 +101,7 @@ function stateLabel(a: AgentLike, inMeeting: boolean, speaking: boolean): Pick<F
   if (a.activity === "BLOCKED") return { label: a.blockedReason ? `Blocked · ${a.blockedReason}` : "Blocked", tone: "danger" };
   if (inMeeting) return { label: speaking ? "In meeting · speaking" : "In meeting", tone: "warn" };
   if (a.activity === "THINKING") return { label: "Thinking · model call running", tone: "active" };
+  if (a.activity === "WORKING") return { label: "Working on a task · tools and tests", tone: "active" };
   if (a.activity === "IN_MEETING") return { label: "In meeting", tone: "warn" };
   if (a.activity === "AVAILABLE") return { label: "Available", tone: "ok" };
   return { label: a.activity.toLowerCase(), tone: "muted" };

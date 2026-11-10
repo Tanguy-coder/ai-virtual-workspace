@@ -76,7 +76,7 @@ export type TaskStatus =
 export type Priority = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export interface Task {
   id: string; projectId: string; number: number; title: string; description: string;
-  acceptanceCriteria: { text: string; met: boolean }[]; status: TaskStatus; priority: Priority;
+  acceptanceCriteria: { text: string; met: boolean; evidence?: string | null }[]; status: TaskStatus; priority: Priority;
   estimateDays: number | null; assigneeId: string | null; blockedReason: string | null;
   sourceKind: "PLAN" | "MEETING" | "MANUAL"; sourceId: string | null; createdByKind: string; createdById: string | null;
   dependsOn: string[]; createdAt: string; updatedAt: string;
@@ -135,3 +135,37 @@ export interface AgentStep {
   inputTokens: number; outputTokens: number; costUsd: number | null; durationMs: number; outcome: string;
   error: string | null; createdAt: string;
 }
+
+// ---- Increment 4: execution (docs/10)
+export interface TaskRun {
+  id: string; projectId: string; taskId: string; agentId: string; branch: string; worktree: string; sandboxId: string | null;
+  image: string | null; status: "RUNNING" | "PAUSED" | "SUBMITTED" | "BLOCKED" | "DONE" | "CANCELLED"; pauseRequested: boolean;
+  steps: number; segmentSteps: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; tokenBudget: number;
+  costUsd: number; blockedReason: string | null; startedAt: string; updatedAt: string; endedAt: string | null;
+}
+export interface RunStep {
+  id: string; runId: string; seq: number; kind: "MODEL" | "TOOL" | "PLATFORM" | "MESSAGE"; tool: string | null; summary: string;
+  detail: Record<string, unknown>; outcome: "OK" | "ERROR" | "REFUSED"; inputTokens: number; outputTokens: number;
+  durationMs: number; createdAt: string;
+}
+export interface Gate { status: "ok" | "failed" | "pending"; detail: string }
+export interface MergeRequest {
+  id: string; projectId: string; number: number; taskId: string; runId: string; sourceBranch: string; targetBranch: string;
+  authorAgentId: string; reviewerAgentId: string | null; title: string; summary: string;
+  status: "IN_REVIEW" | "CHANGES_REQUESTED" | "AWAITING_APPROVAL" | "MERGED" | "CLOSED"; reviewRounds: number;
+  headCommit: string | null; checks: Record<string, Gate>; approvalId: string | null; mergedCommit: string | null;
+  createdAt: string; updatedAt: string; mergedAt: string | null;
+}
+export interface ReviewComment {
+  id: string; mrId: string; round: number; authorKind: "AGENT" | "HUMAN"; authorId: string; file: string | null;
+  line: number | null; body: string; createdAt: string;
+}
+export interface FileChange { status: string; path: string; added: number; removed: number }
+export interface TestRun {
+  id: string; projectId: string; number: number; taskId: string | null; runId: string | null; mrId: string | null; branch: string;
+  commitSha: string | null; trigger: string; command: string; status: "PASSED" | "FAILED" | "ERROR"; passed: number | null;
+  failed: number | null; durationMs: number; failingExcerpt: string; createdAt: string;
+}
+export interface Branch { name: string; head: string; ahead: number; behind: number; lastSubject: string; lastDate: string }
+export interface Commit { sha: string; author: string; date: string; subject: string }
+export interface RepoEntry { path: string; type: string; size: number }

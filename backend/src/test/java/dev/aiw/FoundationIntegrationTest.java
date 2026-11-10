@@ -27,6 +27,7 @@ import tools.jackson.databind.JsonNode;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "aiw.security.master-key=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         "aiw.web.allowed-origins=http://localhost:5180",
+        "aiw.execution.auto-start=false", "aiw.data-dir=${java.io.tmpdir}/aiw-test-data",
         "aiw.events.relay-interval-ms=50"
 })
 @Import(TestcontainersConfig.class)

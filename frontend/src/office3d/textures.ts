@@ -84,6 +84,27 @@ function wrap(g: CanvasRenderingContext2D, text: string, maxWidth: number, maxLi
   return lines;
 }
 
+/** A task run is open: the agent's terminal, without inventing its content. */
+export function workingTexture() {
+  return tex("working", 512, 320, (g, w, h) => {
+    g.fillStyle = "#15171C";
+    g.fillRect(0, 0, w, h);
+    g.fillStyle = "#1E2128";
+    g.fillRect(0, 0, w, 26);
+    g.fillStyle = "#4F8F67";
+    g.beginPath();
+    g.arc(16, 13, 4, 0, 7);
+    g.fill();
+    g.fillStyle = "#9A9690";
+    g.font = `500 13px ${MONO}`;
+    g.fillText("sandbox · task branch", 28, 17);
+    g.fillStyle = "#6B7280";
+    g.fillText("$", 20, 56);
+    g.fillStyle = "#E8552B";
+    g.fillRect(34, 46, 4, 14);
+  });
+}
+
 /** The recorded blocking reason, on the agent's screen. */
 export function blockedTexture(reason: string | null) {
   return tex(`blocked:${reason ?? ""}`, 512, 320, (g, w, h) => {

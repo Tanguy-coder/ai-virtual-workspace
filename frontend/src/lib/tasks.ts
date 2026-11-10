@@ -6,11 +6,11 @@ export const COLUMNS: { status: TaskStatus; label: string; future?: string }[] =
   { status: "READY", label: "Ready" },
   { status: "ASSIGNED", label: "Assigned" },
   { status: "BLOCKED", label: "Blocked" },
-  { status: "IN_PROGRESS", label: "In progress", future: "Reached when an agent starts working in its sandbox (increment 4)." },
-  { status: "IN_REVIEW", label: "In review", future: "Reached on submission for code review (increment 4)." },
-  { status: "IN_TEST", label: "In test", future: "Reached when QA runs the tests (increment 4)." },
-  { status: "VALIDATION", label: "Validation", future: "The validation engine checks tests, review and criteria (increment 4)." },
-  { status: "DONE", label: "Done", future: "Only the validation engine closes a task (increment 4)." },
+  { status: "IN_PROGRESS", label: "In progress", future: "The assigned agent is working on its branch, in its sandbox." },
+  { status: "IN_REVIEW", label: "In review", future: "Tests passed; a teammate reviews the merge request." },
+  { status: "IN_TEST", label: "In test", future: "The platform runs the tests on the submission." },
+  { status: "VALIDATION", label: "Validation", future: "Every gate is green; waiting for your approval to merge." },
+  { status: "DONE", label: "Done", future: "Merged into main. Only the validation engine closes a task." },
 ];
 
 export const STATUS_TONE: Record<TaskStatus, Tone> = {
@@ -87,7 +87,7 @@ export function dropAction(task: Pick<Task, "status" | "assigneeId" | "dependsOn
   if (target === "CANCELLED") return { kind: "cancel" };
   if (target === "BLOCKED") return { kind: "block" };
   if (ENGINE.includes(target)) {
-    return { kind: "refuse", reason: `"${statusLabel(target)}" is set by the execution engine from real work (increment 4).` };
+    return { kind: "refuse", reason: `"${statusLabel(target)}" follows the real work: tests, review and your merge approval move it.` };
   }
   if (from === "BLOCKED") {
     if (target === "ASSIGNED" && !task.assigneeId) return { kind: "assign", unblockFirst: true };

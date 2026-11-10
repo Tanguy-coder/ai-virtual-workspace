@@ -8,6 +8,8 @@ import { relative, time } from "../lib/format";
 import { byId, useAgents, useTasks } from "../lib/queries";
 import { useSelection } from "../lib/selection";
 import { PRIORITY_TONE, STATUS_TONE, statusLabel } from "../lib/tasks";
+import { Link } from "react-router";
+import { RUN_TONE, useRun } from "../lib/engineering";
 import { AgentAvatar } from "./AgentAvatar";
 import { Badge, Button, ErrorText, Field, Input, Select, Tabs, Textarea } from "./ui";
 
@@ -21,6 +23,11 @@ export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
     enabled: !!taskId,
   });
   const t = detail.data?.task;
+  const run = useRun(taskId);
+  const start = useMutation({
+    mutationFn: () => api.post(`/api/v1/tasks/${taskId}/run`, {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["run", taskId] }),
+  });
   const agents = useAgents(t?.projectId ?? "");
   const tasks = useTasks(t?.projectId ?? "");
   const [tab, setTab] = useState<"details" | "discussion" | "history">("details");
@@ -90,6 +97,24 @@ export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
           {tab === "details" && editing && <EditTask task={t} onDone={() => { setEditing(false); refresh(); }} onCancel={() => setEditing(false)} />}
           {tab === "details" && !editing && (
             <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-5">
+              {!run.data?.run && t.status === "ASSIGNED" && (
+                <section className="flex items-center gap-3 rounded-md border border-line bg-panel-2/60 px-3 py-2.5 text-[13px]">
+                  <span className="text-muted">Work starts by itself when the agent is free.</span>
+                  <Button variant="ghost" size="sm" className="ml-auto" disabled={start.isPending} onClick={() => start.mutate()}>Start work now</Button>
+                  <ErrorText error={start.error} />
+                </section>
+              )}
+              {run.data?.run && (
+                <section className="rounded-md border border-line bg-panel-2/60 px-3 py-2.5">
+                  <div className="flex items-center gap-2 text-[13px]">
+                    <Badge tone={RUN_TONE[run.data.run.status]} dot>{run.data.run.status.charAt(0) + run.data.run.status.slice(1).toLowerCase()}</Badge>
+                    <span className="font-mono text-[12px] text-muted">{run.data.run.branch}</span>
+                    <Link to={`/w/${workspaceId}/p/${t.projectId}/runs/${t.id}`} onClick={close} className="ml-auto text-[13px] font-medium hover:underline">Follow the work →</Link>
+                  </div>
+                  <p className="mt-1 text-[12px] text-faint">{run.data.run.steps} steps · {run.data.steps.at(-1)?.summary}</p>
+                </section>
+              )}
+
               <section>
                 <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-faint">Assignee</p>
                 <div className="flex items-center gap-3">
@@ -129,11 +154,11 @@ export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
                   {t.acceptanceCriteria.map((c, i) => (
                     <li key={i} className="flex gap-2 text-[13px]">
                       {c.met ? <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-ok" /> : <Circle size={15} className="mt-0.5 shrink-0 text-faint" />}
-                      <span className="leading-relaxed">{c.text}</span>
+                      <span className="leading-relaxed">{c.text}{c.met && c.evidence && <span className="block text-[12px] text-faint">{c.evidence}</span>}</span>
                     </li>
                   ))}
                 </ul>
-                <p className="mt-2 text-[11px] text-faint">Criteria are checked with evidence by the validation engine (increment 4), never by hand.</p>
+                <p className="mt-2 text-[11px] text-faint">Criteria are checked with evidence during the review (a test that proves them), never by hand.</p>
               </section>
 
               <section>

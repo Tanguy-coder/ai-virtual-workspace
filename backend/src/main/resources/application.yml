@@ -38,3 +38,14 @@ aiw:
     master-key: ${AIW_MASTER_KEY}
   web:
     allowed-origins: ${AIW_ALLOWED_ORIGINS:http://localhost:5180}
+  # Increment 4: repositories, worktrees and sandboxes (docs/10).
+  data-dir: ${AIW_DATA_DIR:${user.home}/.aiw}
+  sandbox:
+    enabled: ${AIW_SANDBOX_ENABLED:true}
+    cpus: "1"
+    memory: 1g
+    command-timeout-seconds: 300
+  execution:
+    auto-start: ${AIW_AUTO_START:true}
+    max-steps-per-segment: 40
+    token-budget: 200000

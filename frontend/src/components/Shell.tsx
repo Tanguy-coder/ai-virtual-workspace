@@ -1,9 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Activity, BarChart3, BookOpen, Building2, ChevronsUpDown, Code2, FileText, FlaskConical, FolderKanban, GitBranch, Inbox,
-  KanbanSquare, LayoutDashboard, LogOut, Moon, Network, Rocket, Search, Settings, ShieldCheck, Sparkles, Sun,
-  TerminalSquare, UserPlus, Users, Video, type LucideIcon,
-} from "lucide-react";
+import { Activity, BarChart3, BookOpen, Building2, ChevronsUpDown, Code2, FileText, FlaskConical, FolderKanban, GitBranch, GitPullRequest, Inbox, KanbanSquare, LayoutDashboard, LogOut, Moon, Network, Rocket, Search, Settings, ShieldCheck, Sparkles, Sun, TerminalSquare, UserPlus, Users, Video, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router";
 import { api } from "../api/client";
@@ -25,7 +21,7 @@ export const SPACES: { id: Space; label: string; icon: LucideIcon; home: string 
   { id: "office", label: "Virtual Office", icon: Building2, home: "office" },
   { id: "agents", label: "Agents", icon: Users, home: "team" },
   { id: "project", label: "Project", icon: FolderKanban, home: "tasks" },
-  { id: "engineering", label: "Engineering", icon: Code2, home: "code" },
+  { id: "engineering", label: "Engineering", icon: Code2, home: "runs" },
 ];
 
 export const NAV: Record<Space, NavItem[]> = {
@@ -49,9 +45,11 @@ export const NAV: Record<Space, NavItem[]> = {
     { to: "documents", label: "Documents", icon: FileText },
   ],
   engineering: [
-    { to: "code", label: "Code", icon: TerminalSquare, increment: 4 },
-    { to: "git", label: "Git", icon: GitBranch, increment: 4 },
-    { to: "testing", label: "Testing", icon: FlaskConical, increment: 4 },
+    { to: "runs", label: "Work", icon: Activity },
+    { to: "merge-requests", label: "Merge requests", icon: GitPullRequest },
+    { to: "code", label: "Code", icon: TerminalSquare },
+    { to: "git", label: "Branches", icon: GitBranch },
+    { to: "testing", label: "Testing", icon: FlaskConical },
     { to: "security", label: "Security", icon: ShieldCheck, increment: 5 },
     { to: "deployment", label: "Deployment", icon: Rocket, increment: 6 },
   ],

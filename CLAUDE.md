@@ -15,7 +15,7 @@ This is a personal project. Keep project documents as local files in `docs/`. Ne
 Scope is the **complete product**, not an MVP. It is delivered in 6 increments (Socle → Organisation → Orchestration → Production → Qualité/Sécurité → Livraison), each gated by a tested pass criterion before the next starts.
 
 - `docs/04-increment-1-report.md`, `docs/05-increment-2-report.md`: what each increment delivers, how it was verified, known limits.
-- `docs/06-frontend-audit-et-direction.md` (validated design system "Studio Model"), `docs/07-virtual-office-proposition.md` (validated Virtual Office direction: React Three Fiber, rigged glTF characters; interactive mockup in `docs/design/office/`), `docs/08-refonte-frontend.md` (redesign status).
+- `docs/06-frontend-audit-et-direction.md` (validated design system "Studio Model"), `docs/07-virtual-office-proposition.md` (validated Virtual Office direction: React Three Fiber, rigged glTF characters; interactive mockup in `docs/design/office/`), `docs/08-refonte-frontend.md` (redesign status), `docs/09-sobriete-tokens.md` (token sobriety, measured), `docs/10-engineering-workspace-proposition.md` (Engineering Workspace and increment 4 proposal; mockup in `docs/design/engineering/`).
 
 ## Commands
 

@@ -44,6 +44,15 @@ function keysFor(e: EventRecord): unknown[][] {
   if (p && e.type === "memory.recorded") keys.push(["memory", p]);
   if (p && e.type.startsWith("job.")) keys.push(["jobs", p], ["agents", p]);
   if (e.type === "agent.step_completed") keys.push(["steps", e.subject.id]);
+  if (p && e.type.startsWith("task_run.")) {
+    keys.push(["runs", p], ["run", e.payload.taskId], ["agents", p]);
+    if (e.type !== "task_run.step") keys.push(["tasks", p], ["branches", p]);
+  }
+  if (p && e.type === "test_run.completed") keys.push(["test-runs", p], ["mr"]);
+  if (p && e.type.startsWith("merge_request.")) {
+    keys.push(["merge-requests", p], ["mr", e.subject.id], ["tasks", p], ["branches", p], ["run", e.payload.taskId]);
+    if (e.type === "merge_request.merged") keys.push(["repo", p]);
+  }
   return keys;
 }
 

@@ -2,7 +2,7 @@ import { memo } from "react";
 import { Box, Cyl, M, planeGeo, RBox } from "./kit";
 import { Chair } from "./Building";
 import type { DeskView } from "./represent";
-import { blockedTexture, generatingTexture, sleepTexture } from "./textures";
+import { blockedTexture, generatingTexture, sleepTexture, workingTexture } from "./textures";
 
 /** Number of monitors per department: a matter of furniture, not of activity. */
 const MONITORS: Record<string, number> = { backend: 2, frontend: 2, devops: 2, cto: 2, security: 2 };
@@ -16,7 +16,7 @@ export const Workstation = memo(function Workstation({ view }: { view: DeskView 
   const dw = seat.wide ? 1.8 : 1.5;
   const n = seat.wide ? 3 : MONITORS[seat.room] ?? 1;
   const sw = 0.56;
-  const map = screen === "generating" ? generatingTexture() : screen === "blocked" ? blockedTexture(blockedReason) : sleepTexture();
+  const map = screen === "generating" ? generatingTexture() : screen === "working" ? workingTexture() : screen === "blocked" ? blockedTexture(blockedReason) : sleepTexture();
   return (
     <group position={[seat.x, 0, seat.z]} rotation-y={seat.ry}>
       <RBox s={[dw, 0.04, 0.78]} r={0.015} m={M.deskTop()} position={[0, 0.74, 0.62]} />
