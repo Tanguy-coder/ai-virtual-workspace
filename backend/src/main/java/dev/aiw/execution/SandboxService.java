@@ -32,11 +32,17 @@ public class SandboxService {
     private final String memory;
     private final Duration commandTimeout;
     private final String user;
+    private final Path dataDir;
+    /** Named volume holding the data dir (platform running in Docker), or null: worktrees are host paths. */
+    private final String dataVolume;
 
     SandboxService(@Value("${aiw.sandbox.enabled:true}") boolean enabled, @Value("${aiw.sandbox.cpus:1}") String cpus,
                    @Value("${aiw.sandbox.memory:1g}") String memory,
-                   @Value("${aiw.sandbox.command-timeout-seconds:300}") int timeoutSeconds) {
+                   @Value("${aiw.sandbox.command-timeout-seconds:300}") int timeoutSeconds,
+                   @Value("${aiw.data-dir}") String dataDir, @Value("${aiw.sandbox.data-volume:}") String dataVolume) {
         this.enabled = enabled;
+        this.dataDir = Path.of(dataDir).toAbsolutePath().normalize();
+        this.dataVolume = dataVolume == null || dataVolume.isBlank() ? null : dataVolume.strip();
         this.cpus = cpus;
         this.memory = memory;
         this.commandTimeout = Duration.ofSeconds(timeoutSeconds);
@@ -71,7 +77,10 @@ public class SandboxService {
     /** Starts (or returns, if still alive) the container of a run. */
     public String ensure(String runId, String existingId, Path worktree, String image) {
         if (!enabled) throw new SandboxException("Sandboxes are disabled on this platform (aiw.sandbox.enabled=false)");
-        if (existingId != null && docker("inspect", "-f", "{{.State.Running}}", existingId).out().strip().equals("true")) {
+        // A container mounted the old way (host path while the data is in a volume) sees an empty /work: replace it.
+        String expected = dataVolume == null ? "bind" : "volume";
+        if (existingId != null && docker("inspect", "-f", "{{.State.Running}} {{range .Mounts}}{{.Type}}{{end}}", existingId)
+                .out().strip().equals("true " + expected)) {
             return existingId;
         }
         if (existingId != null) docker("rm", "-f", existingId);
@@ -82,7 +91,7 @@ public class SandboxService {
         List<String> cmd = new ArrayList<>(List.of("docker", "run", "-d", "--rm", "--name", "aiw-run-" + runId.toLowerCase() + "-" + System.nanoTime() % 100000,
                 "--label", "aiw.run=" + runId, "--network", "none", "--cpus", cpus, "--memory", memory,
                 "--pids-limit", "512", "--security-opt", "no-new-privileges", "-e", "HOME=/tmp", "-e", "CI=true",
-                "-e", "npm_config_cache=/tmp/.npm", "-v", worktree.toAbsolutePath() + ":/work", "-w", "/work"));
+                "-e", "npm_config_cache=/tmp/.npm", "--mount", mount(worktree), "-w", "/work"));
         if (user != null) {
             cmd.add("--user");
             cmd.add(user);
@@ -91,6 +100,14 @@ public class SandboxService {
         Processes.Result r = Processes.run(cmd, null, Duration.ofMinutes(2));
         if (!r.ok()) throw new SandboxException("Could not start the sandbox: " + r.combined().strip());
         return r.out().strip();
+    }
+
+    /** The worktree at /work: a bind mount of a host path, or the matching subpath of the data volume. */
+    String mount(Path worktree) {
+        Path abs = worktree.toAbsolutePath().normalize();
+        if (dataVolume == null) return "type=bind,source=" + abs + ",target=/work";
+        if (!abs.startsWith(dataDir)) throw new SandboxException("The worktree " + abs + " is outside the data directory " + dataDir);
+        return "type=volume,source=" + dataVolume + ",target=/work,volume-subpath=" + dataDir.relativize(abs);
     }
 
     /** Runs one command in the container. Commands that install packages get network access for their duration. */

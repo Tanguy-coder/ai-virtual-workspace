@@ -45,6 +45,9 @@ aiw:
     cpus: "1"
     memory: 1g
     command-timeout-seconds: 300
+    # When the platform itself runs in Docker with its data in a named volume, sandboxes mount their worktree from
+    # that volume: a path inside the platform's container means nothing to the Docker daemon on the host.
+    data-volume: ${AIW_SANDBOX_DATA_VOLUME:}
   execution:
     auto-start: ${AIW_AUTO_START:true}
     max-steps-per-segment: 40

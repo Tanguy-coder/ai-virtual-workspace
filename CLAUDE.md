@@ -25,6 +25,7 @@ Scope is the **complete product**, not an MVP. It is delivered in 6 increments (
 - Backend tests (Docker required, Testcontainers): `cd backend && mvn test`. Run a single test with `mvn test -Dtest='FoundationIntegrationTest#anthropicAdapterUsesSdkWithFallbacksAndListPrice'`.
 - Frontend unit tests: `cd frontend && npx vitest run`.
 - Visual check (headless system Chrome, logs in with `AIW_DEV_TEST_*` from `.env`): `cd frontend && node scripts/shoot.mjs <outDir> "/w/{ws}/p/{p}/office"`; `node scripts/console.mjs <page>` prints runtime errors. Look at screenshots before claiming a UI change works.
+- Full stack in Docker (`docker compose --env-file .env up -d --build`): the backend starts sandboxes through the host's Docker socket, so sandboxes mount worktrees from the named volume `aiw_aiwdata` (`AIW_SANDBOX_DATA_VOLUME`, `SandboxService.mount`), never from a path inside the backend container.
 - `ModularityTest` runs Spring Modulith `verify()`: module dependency cycles or access to another module's internals fail the build.
 
 ## Code architecture (backend)

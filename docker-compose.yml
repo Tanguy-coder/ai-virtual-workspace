@@ -45,6 +45,8 @@ services:
       AIW_ALLOWED_ORIGINS: ${AIW_ALLOWED_ORIGINS:-http://localhost:5180,http://127.0.0.1:5180}
       AIW_DATA_DIR: /root/.aiw
       AIW_SANDBOX_ENABLED: ${AIW_SANDBOX_ENABLED:-true}
+      # Sandboxes are started by the host's Docker daemon: they mount worktrees from this volume, not from a path.
+      AIW_SANDBOX_DATA_VOLUME: aiw_aiwdata
     ports:
       - "8090:8090"
     volumes:
@@ -76,3 +78,4 @@ volumes:
   pgdata:
   redisdata:
   aiwdata:
+    name: aiw_aiwdata # fixed name: sandboxes mount it (AIW_SANDBOX_DATA_VOLUME)
