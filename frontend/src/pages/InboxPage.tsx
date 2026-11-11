@@ -45,7 +45,10 @@ export function InboxPage() {
               <IconChip tone="warn"><ShieldQuestion size={16} /></IconChip>
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-semibold">{a.summary}</p>
-                <p className="mt-0.5 text-[12px] text-muted">{a.action} · requested {dateTime(a.createdAt)}</p>
+                <p className="mt-0.5 text-[12px] text-muted">
+                  {a.projectId ? `${name(a.projectId)} · ` : ""}{a.action === "branch.merge_main" ? "asked by your Lead" : a.action} · requested {dateTime(a.createdAt)}
+                </p>
+                {a.action === "branch.merge_main" && <MainMergeDetails details={a.details} />}
                 <div className="mt-3 flex gap-2">
                   <Button onClick={() => decide.mutate({ id: a.id, approve: true })}>Approve</Button>
                   <Button variant="danger" onClick={() => decide.mutate({ id: a.id, approve: false })}>Reject</Button>
@@ -72,6 +75,23 @@ export function InboxPage() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/** What a merge of develop into main brings, as the Lead recorded it when asking. */
+function MainMergeDetails({ details }: { details: Record<string, unknown> }) {
+  const tasks = Array.isArray(details.tasks) ? (details.tasks as string[]) : [];
+  return (
+    <div className="mt-2 text-[12px] text-muted">
+      {typeof details.note === "string" && <p className="mb-1">{details.note}</p>}
+      {tasks.length > 0 && (
+        <ul className="list-inside list-disc">
+          {tasks.slice(0, 12).map((t) => <li key={t} className="truncate">{t}</li>)}
+          {tasks.length > 12 && <li className="list-none text-faint">and {tasks.length - 12} more</li>}
+        </ul>
+      )}
+      <p className="mt-1 font-mono text-faint">develop @ {String(details.commit ?? "").slice(0, 7)} → main</p>
     </div>
   );
 }

@@ -236,7 +236,9 @@ class RealignmentIntegrationTest {
                         Assigning it and adding the follow-up.
                         <orders>[{"do": "assign", "task": "T-1", "assignee": "%1$s"},
                           {"do": "create_task", "title": "Follow-up", "criteria": ["done"], "assignee": "%1$s", "dependsOn": [1]},
-                          {"do": "pause", "task": 99}]</orders>""".formatted(devName);
+                          {"do": "pause", "task": 99},
+                          {"do": "update_task", "task": 1, "description": "Vanilla HTML, no build"},
+                          {"do": "cancel", "task": 2}]</orders>""".formatted(devName);
             }
             if (body.contains("<tools>")) return WAIT;
             return "Noted.";
@@ -258,7 +260,9 @@ class RealignmentIntegrationTest {
                 m -> m.size() == 2 && m.get(1).get("status").asString().equals("FINAL")).get(1);
         assertThat(reply.get("content").asString()).isEqualTo("Assigning it and adding the follow-up.");
         JsonNode actions = reply.get("actions");
-        assertThat(actions.size()).isEqualTo(3);
+        assertThat(actions.size()).isEqualTo(5);
+        assertThat(actions.get(3).get("detail").asString()).contains("T-1 rewritten");
+        assertThat(actions.get(4).get("ok").asBoolean()).isTrue();
         assertThat(actions.get(0).get("ok").asBoolean()).isTrue();
         assertThat(actions.get(1).get("detail").asString()).contains("T-2 created");
         assertThat(actions.get(2).get("ok").asBoolean()).isFalse();
@@ -273,6 +277,50 @@ class RealignmentIntegrationTest {
         await(() -> api.get("/api/v1/agents/" + leadId + "/messages").json(), m -> m.size() == 4);
         assertThat(stub.requests.stream().anyMatch(r -> r.body().contains("Thanks") && r.body().contains("Outcome of your orders")
                 && r.body().contains("No task T-99"))).isTrue();
+        // It sees closed tasks as closed, and the task as rewritten.
+        assertThat(stub.requests.stream().anyMatch(r -> r.body().contains("Thanks") && r.body().contains("Closed (no longer to do): T-2 cancelled"))).isTrue();
+        assertThat(find(api.get("/api/v1/projects/" + p + "/tasks").json(), "Login form").get("description").asString()).isEqualTo("Vanilla HTML, no build");
+    }
+
+    /**
+     * gpt-oss behind OpenRouter answered a step with native tool calls in a normal (200) reply and an empty content,
+     * which the platform took for "No JSON object" and blocked the task (CTO's project, T-14). Native calls, with
+     * underscore names, are now read as the actions; a reply with too many actions runs the first five.
+     */
+    @Test
+    void nativeToolCallsInAnOkReplyAndTooManyActionsAreRead() {
+        TestApi api = new TestApi(port);
+        api.register("cto-native");
+        String ws = api.post("/api/v1/workspaces", Map.of("name", "Native")).json().get("id").asString();
+        String pid = api.post("/api/v1/workspaces/" + ws + "/providers", Map.of("preset", "ollama", "name", "Small",
+                "baseUrl", stub.baseUrl() + "/v1")).json().get("id").asString();
+        api.put("/api/v1/workspaces/" + ws + "/providers/" + pid + "/models", Map.of("defaultModel", "stub-large"));
+        String p = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "Native")).json().get("id").asString();
+        String dev = api.post("/api/v1/projects/" + p + "/agents", Map.of("roleTemplateId", "rt_java")).json().get("id").asString();
+
+        stub.openAiResponder = body -> !body.contains("<tools>") ? "OK" : body.contains("Native reply") ? """
+                RAW:{"id":"c2","object":"chat.completion","model":"stub-large","choices":[{"index":0,"finish_reason":"tool_calls",
+                 "message":{"role":"assistant","content":null,"tool_calls":[
+                  {"id":"t1","type":"function","function":{"name":"file_write","arguments":"{\\"path\\": \\"notes.md\\", \\"content\\": \\"hi\\\\n\\"}"}},
+                  {"id":"t2","type":"function","function":{"name":"task_block","arguments":"{\\"reason\\": \\"Native calls read\\"}"}}]}}],
+                 "usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}"""
+                : """
+                {"thought": "Many.", "actions": [{"tool": "repo.tree", "args": {}}, {"tool": "repo.tree", "args": {}},
+                 {"tool": "repo.tree", "args": {}}, {"tool": "repo.tree", "args": {}},
+                 {"tool": "task.block", "args": {"reason": "Five ran"}}, {"tool": "repo.tree", "args": {}}]}""";
+        String t1 = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Native reply",
+                "acceptanceCriteria", List.of("it works"), "assigneeId", dev)).json().get("id").asString();
+        JsonNode run = await(() -> api.get("/api/v1/tasks/" + t1 + "/run").json(),
+                r -> !r.get("run").isNull() && r.get("run").get("status").asString().equals("BLOCKED"));
+        assertThat(run.get("run").get("blockedReason").asString()).contains("Native calls read");
+        assertThat(run.get("steps").toString()).contains("file.write notes.md");
+
+        String t2 = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Many actions",
+                "acceptanceCriteria", List.of("it works"), "assigneeId", dev)).json().get("id").asString();
+        JsonNode many = await(() -> api.get("/api/v1/tasks/" + t2 + "/run").json(),
+                r -> !r.get("run").isNull() && r.get("run").get("status").asString().equals("BLOCKED"));
+        assertThat(many.get("run").get("blockedReason").asString()).contains("Five ran");
+        assertThat(many.get("steps").toString()).contains("Only the first 5 actions run");
     }
 
     /**

@@ -33,3 +33,15 @@ Un modèle à petite fenêtre de contexte (par exemple `allam-2-7b`, 4 096 token
 ## Vérification
 
 `RealignmentIntegrationTest.smallProvidersRateLimitsAndNativeToolCallsAreHandled` rejoue ces réponses avec les corps réels : le message au Lead aboutit après un 429 « too large » puis un 429 d'attente (`max_tokens` 4000 → 1000), le message suivant part directement à 1000, le plafond du modèle puis la limite de crédits ramènent la requête à 800 puis 630, et un appel d'outil natif bloque bien la tâche avec la raison donnée par le modèle. `ModelGatewayRateLimitTest` lit les réponses réelles sans réseau, dont le 413 au « Requested » inchangé. Suite backend complète : 29 tests au vert.
+
+## Appels d'outils natifs dans une réponse normale (gpt-oss via OpenRouter, 2026-11-11)
+
+T-14 était bloquée sur « No JSON object was found in the reply ». gpt-oss renvoyait une réponse 200 avec `content` vide et des `tool_calls` natifs, alors qu'aucun outil n'était proposé. De plus, l'extrait montré à l'agent était vide, si bien qu'il ne voyait que la consigne de la plateforme.
+
+- **Lecture des appels natifs :** l'adaptateur OpenAI-compatible les lit (`{"tool_calls": [{"name","arguments"}]}`). L'étape les convertit en actions, et les noms à underscore (`file_write`) deviennent nos noms (`file.write`).
+- **Réponses coupées :** `finish_reason: "length"` est traité comme une coupure par `max_tokens`, avec le message « cut off by the token limit ».
+- **Réponse vide :** elle est signalée comme telle (« The reply was empty »).
+- **Trop d'actions :** une réponse de plus de 5 actions n'est plus rejetée. Les 5 premières s'exécutent, et l'agent est informé que les suivantes n'ont pas été lancées.
+- **Compteur de réponses inutilisables :** il repart à zéro après un blocage. Une reprise donne donc à nouveau 3 essais, au lieu d'un seul.
+
+Test : `RealignmentIntegrationTest.nativeToolCallsInAnOkReplyAndTooManyActionsAreRead`.

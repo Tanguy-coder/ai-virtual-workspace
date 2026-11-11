@@ -6,6 +6,7 @@ import dev.aiw.governance.AuditLog;
 import dev.aiw.organization.Agent;
 import dev.aiw.organization.AgentService;
 import dev.aiw.organization.LeadCommands;
+import dev.aiw.scm.GitService;
 import dev.aiw.shared.Actor;
 import dev.aiw.shared.ApiException;
 import java.util.ArrayList;
@@ -17,6 +18,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
@@ -42,10 +44,16 @@ class LeadChatCommands implements LeadCommands {
     private final WorkspaceAccess access;
     private final AuditLog audit;
     private final TransactionTemplate tx;
+    private final BranchFlow branches;
+    private final GitService git;
+    private final JdbcClient jdbc;
 
     LeadChatCommands(TaskService tasks, TaskRuns runs, TaskExecution execution, TaskSplitter splitter,
                      RealignmentService realignment, AgentService agents, WorkspaceAccess access, AuditLog audit,
-                     TransactionTemplate tx) {
+                     TransactionTemplate tx, BranchFlow branches, GitService git, JdbcClient jdbc) {
+        this.branches = branches;
+        this.git = git;
+        this.jdbc = jdbc;
         this.tasks = tasks;
         this.runs = runs;
         this.execution = execution;
@@ -66,6 +74,8 @@ class LeadChatCommands implements LeadCommands {
                 <orders>[{"do": "...", ...}]</orders>
                 Orders (task = its number, 3 for T-3; assignee = exact name of a team member):
                 - {"do":"create_task","title":"...","description":"...","criteria":["..."],"assignee":"Name","priority":"MEDIUM","dependsOn":[2]}
+                - {"do":"update_task","task":3,"title":"...","description":"...","criteria":["..."]}  rewrites an open task \
+                (give only the fields that change); the agent works from the task as written, so change scope here, not by message
                 - {"do":"assign","task":3,"assignee":"Name"}  an assigned task starts by itself when its agent is free
                 - {"do":"start","task":3}
                 - {"do":"pause","task":3}
@@ -75,6 +85,10 @@ class LeadChatCommands implements LeadCommands {
                 - {"do":"split","task":3,"guidance":"..."}  you split the task into smaller ones (its work must be paused or blocked)
                 - {"do":"cancel","task":3}
                 - {"do":"realign","concern":"..."}  you organize a realignment meeting with the people concerned
+                - {"do":"merge_main","note":"what develop brings"}  you ask the CTO to approve merging develop into main
+                Branches: agents branch from develop; you review their merge requests and your approval merges them into \
+                develop. Only the CTO approves a merge into main, through merge_main (also requested by the platform \
+                when every task is merged).
                 Rules:
                 - Give an order only when the CTO's latest message asks for it or approves what you proposed. Otherwise propose.
                 - The platform runs the orders after your reply and shows the CTO the real outcome: never write that it is done.
@@ -111,6 +125,18 @@ class LeadChatCommands implements LeadCommands {
             sb.append("\n");
         }
         if (open.size() > STATE_LINES) sb.append("(").append(open.size() - STATE_LINES).append(" more open tasks)\n");
+        // Closed tasks too, so the Lead never takes a cancelled or done task for one still standing.
+        List<Task> closed = all.stream().filter(t -> TaskService.CLOSED.contains(t.status())).sorted(Comparator.comparingInt(Task::number)).toList();
+        if (!closed.isEmpty()) {
+            sb.append("Closed (no longer to do): ").append(closed.stream().map(t -> "T-" + t.number() + " " + t.status().toLowerCase())
+                    .collect(Collectors.joining(", "))).append("\n");
+        }
+        git.repo(projectId).filter(r -> git.hasBranch(r, GitService.DEVELOP)).ifPresent(r -> {
+            sb.append("Branches: develop is ").append(git.ahead(r, GitService.MAIN, GitService.DEVELOP)).append(" commit(s) ahead of main");
+            boolean pending = jdbc.sql("SELECT count(*) FROM approvals WHERE project_id = ? AND action = ? AND status = 'PENDING'")
+                    .params(projectId, BranchFlow.MERGE_MAIN).query(Long.class).single() > 0;
+            sb.append(pending ? " · merge into main waiting for the CTO\n" : "\n");
+        });
         sb.append("Team:\n");
         team.forEach(a -> sb.append("- ").append(a.name()).append(": ").append(a.title()).append(" · ")
                 .append(a.status().equals("ACTIVE") ? a.activity().toLowerCase() : a.status().toLowerCase())
@@ -165,6 +191,22 @@ class LeadChatCommands implements LeadCommands {
                     return t;
                 });
                 yield "T-" + created.number() + " created" + (assignee == null ? "" : ", assigned to " + assignee.name());
+            }
+            case "update_task" -> {
+                Task t = task(projectId, o.path("task"));
+                String title = LeadService.text(o, "title");
+                String description = LeadService.text(o, "description");
+                List<String> criteria = o.has("criteria") ? LeadService.strings(o.path("criteria")).stream().limit(12).toList() : null;
+                if (title.isBlank() && description.isBlank() && criteria == null) {
+                    throw ApiException.badRequest("nothing_to_update", "Give the title, description or criteria to change");
+                }
+                tasks.update(t.id(), new TaskService.Draft(title.isBlank() ? null : clip(title, 200), description.isBlank() ? null : description,
+                        criteria, null, null, null), cto);
+                runs.openForTask(t.id()).ifPresent(r -> execution.message(t.id(), userId,
+                        "The task was rewritten by the Lead on the CTO's order. Work from the new version:\n" + t.number() + ". "
+                                + (title.isBlank() ? t.title() : title) + (description.isBlank() ? "" : "\n" + clip(description, 4_000))
+                                + (criteria == null ? "" : "\nAcceptance criteria:\n- " + String.join("\n- ", criteria))));
+                yield "T-" + t.number() + " rewritten" + (runs.openForTask(t.id()).isPresent() ? "; its agent is told" : "");
             }
             case "assign" -> {
                 Task t = task(projectId, o.path("task"));
@@ -222,6 +264,11 @@ class LeadChatCommands implements LeadCommands {
                 if (concern.isBlank()) throw ApiException.badRequest("concern_required", "Say what the meeting must realign");
                 realignment.delegate(ws, projectId, userId, clip(concern, 5_000));
                 yield "Realignment meeting being prepared";
+            }
+            case "merge_main" -> {
+                BranchFlow.MainMerge m = branches.requestMainMerge(ws, projectId, LeadService.text(o, "note"));
+                if (!m.requested()) throw ApiException.conflict("merge_main_refused", m.detail());
+                yield m.detail();
             }
             default -> throw ApiException.badRequest("unknown_order", "Unknown order \"" + action + "\"");
         };

@@ -19,7 +19,10 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
     case "test_run.completed": return `Tests ${String(p.status).toLowerCase()} on ${p.branch} (tr-${p.number}${p.passed != null ? ` · ${p.passed} passed` : ""}${p.failed ? `, ${p.failed} failed` : ""})`;
     case "merge_request.opened": return `${actor} opened merge request !${p.number}: ${p.title}`;
     case "merge_request.reviewed": return `${actor} ${p.decision === "APPROVE" ? "approved" : "requested changes on"} !${p.number}`;
-    case "merge_request.merged": return `!${p.number} merged into main (${String(p.commit).slice(0, 7)})`;
+    case "merge_request.merged": return `!${p.number} merged into ${p.into ?? "main"} (${String(p.commit).slice(0, 7)})`;
+    case "branch.created": return `${actor} created the ${p.branch} branch from ${p.from}`;
+    case "branch.merged": return `develop merged into main with the CTO's approval (${String(p.commit).slice(0, 7)})`;
+    case "branch.merge_failed": return `The merge of develop into main failed: ${p.reason}`;
     case "agent.step_completed": return `${agent} · ${p.summary} (${String(p.outcome).toLowerCase()}, ${Math.round(Number(p.durationMs) / 100) / 10}s)`;
     case "job.queued": return `Queued ${job[String(p.type)] ?? p.type} for ${who(p.agentId)}`;
     case "job.completed": return `${who(p.agentId)} finished the ${job[String(p.type)] ?? p.type}`;
@@ -94,7 +97,8 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
 
 export function tone(e: EventRecord): "danger" | "warn" | "ok" | "muted" {
   if (e.type === "test_run.completed") return e.payload.status === "PASSED" ? "ok" : "danger";
-  if (e.type === "merge_request.merged") return "ok";
+  if (e.type === "merge_request.merged" || e.type === "branch.merged") return "ok";
+  if (e.type === "branch.merge_failed") return "danger";
   if (e.type === "message.failed" || e.payload.outcome === "ERROR" || e.type.endsWith(".failed") || e.type === "task.blocked") return "danger";
   if (e.type === "hiring_proposal.created" || e.type === "briefing.analyzed") return "warn";
   if (e.type === "plan.created" || e.type === "meeting.minutes_published" || e.type === "hiring_proposal.accepted") return "ok";

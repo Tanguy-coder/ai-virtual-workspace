@@ -130,9 +130,12 @@ function MergeRequestDetail({ mrId }: { mrId: string }) {
         </Card>
         <Card title="Merge">
           {mr.status === "MERGED" && <p className="text-[13px]"><GitMerge size={14} className="mr-1 inline" />Merged as <span className="font-mono">{mr.mergedCommit?.slice(0, 7)}</span> {mr.mergedAt && relative(mr.mergedAt)}.</p>}
-          {mr.status === "AWAITING_APPROVAL" && (
+          {mr.status === "AWAITING_APPROVAL" && !mr.approvalId && (
+            <p className="text-[13px] text-muted">Every gate is green and the review is approved: the platform is merging into {mr.targetBranch}.</p>
+          )}
+          {mr.status === "AWAITING_APPROVAL" && mr.approvalId && (
             <>
-              <p className="text-[13px]">Every gate is green. Merging into main needs your approval.</p>
+              <p className="text-[13px]">Every gate is green. Merging into {mr.targetBranch} needs your approval.</p>
               <Button className="mt-3" variant="signal" disabled={!mr.approvalId || approve.isPending} onClick={() => approve.mutate(true)}><GitMerge size={14} /> Approve and merge</Button>
               <div className="mt-3 space-y-2 border-t border-line pt-3">
                 <Textarea rows={2} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Why not? Sent to the author." />

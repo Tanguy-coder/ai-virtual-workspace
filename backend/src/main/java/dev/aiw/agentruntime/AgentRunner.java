@@ -289,7 +289,9 @@ public class AgentRunner {
         }
         int open = t.indexOf('{');
         int close = t.lastIndexOf('}');
-        if (open < 0 || close < open) throw new InvalidOutput("No JSON object was found in the reply.");
+        if (open < 0 || close < open) {
+            throw new InvalidOutput(text == null || text.isBlank() ? "The reply was empty." : "No JSON object was found in the reply.");
+        }
         try {
             JsonNode node = LENIENT.readTree(t.substring(open, close + 1));
             if (!node.isObject()) throw new InvalidOutput("The reply is not a JSON object.");

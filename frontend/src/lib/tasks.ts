@@ -10,7 +10,7 @@ export const COLUMNS: { status: TaskStatus; label: string; future?: string }[] =
   { status: "IN_REVIEW", label: "In review", future: "Tests passed; a teammate reviews the merge request." },
   { status: "IN_TEST", label: "In test", future: "The platform runs the tests on the submission." },
   { status: "VALIDATION", label: "Validation", future: "Every gate is green; waiting for your approval to merge." },
-  { status: "DONE", label: "Done", future: "Merged into main. Only the validation engine closes a task." },
+  { status: "DONE", label: "Done", future: "Merged into develop after the Lead's review. Only the validation engine closes a task." },
 ];
 
 export const STATUS_TONE: Record<TaskStatus, Tone> = {

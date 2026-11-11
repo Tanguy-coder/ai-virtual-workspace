@@ -20,3 +20,15 @@ Le manuel des ordres est dans la partie stable du prompt système, donc mis en c
 - `RealignmentIntegrationTest.theLeadCarriesOutTheCtosOrdersFromItsChat` : le CTO demande au Lead d'assigner T-1. La réponse scriptée contient trois ordres. T-1 est assigné, T-2 est créé et dépend de T-1, et l'ordre sur T-99 est refusé avec sa raison. Le bloc n'apparaît pas dans le texte, l'état du projet figurait dans la requête, et le résultat revient au Lead au message suivant.
 - Suite backend complète (24 tests) au vert. Frontend : typecheck, vitest, build OK.
 - Pas de contrôle visuel du chat : la stack Docker en cours n'a pas la migration V8.
+
+## Réécrire une tâche, voir les tâches fermées (2026-11-11)
+
+Constat sur le projet du CTO :
+
+- **Recadrage par message seulement :** le Lead a voulu ramener T-3 au périmètre vanilla, mais par un simple message. Le découpage de T-3 a ensuite relu la description d'origine (Vite) et recréé des tâches Vite.
+- **Tâches fermées invisibles :** `<project_state>` ne listait pas les tâches fermées. Le Lead a donc affirmé que T-1, T-3 et T-11 étaient encore ouvertes, alors qu'elles étaient annulées.
+
+Corrections :
+
+- **Nouvel ordre `update_task`** `{"task":3,"title","description","criteria"}` : il réécrit une tâche ouverte, et l'agent qui y travaille est prévenu. Le manuel du Lead précise qu'un changement de périmètre se fait ici, pas par message.
+- **Tâches fermées dans l'état :** `<project_state>` ajoute la ligne « Closed (no longer to do): T-1 cancelled, … ».

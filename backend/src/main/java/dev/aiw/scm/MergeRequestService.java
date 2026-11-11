@@ -29,22 +29,23 @@ public class MergeRequestService {
         this.json = json;
     }
 
-    public MergeRequest open(String workspaceId, String projectId, String taskId, String runId, String branch,
+    public MergeRequest open(String workspaceId, String projectId, String taskId, String runId, String branch, String target,
                              String authorId, String reviewerId, String title, String summary, String head) {
         String id = Ids.newId();
         int number = jdbc.sql("SELECT coalesce(max(number), 0) + 1 FROM merge_requests WHERE project_id = ?")
                 .param(projectId).query(Integer.class).single();
         jdbc.sql("""
-                INSERT INTO merge_requests (id, workspace_id, project_id, number, task_id, run_id, source_branch,
+                INSERT INTO merge_requests (id, workspace_id, project_id, number, task_id, run_id, source_branch, target_branch,
                                             author_agent_id, reviewer_agent_id, title, summary, status, head_commit)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'IN_REVIEW', ?)
-                """).params(id, workspaceId, projectId, number, taskId, runId, branch, authorId, reviewerId, title,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'IN_REVIEW', ?)
+                """).params(id, workspaceId, projectId, number, taskId, runId, branch, target, authorId, reviewerId, title,
                 summary, head).update();
         Map<String, Object> payload = new HashMap<>();
         payload.put("number", number);
         payload.put("title", title);
         payload.put("taskId", taskId);
         payload.put("branch", branch);
+        payload.put("target", target);
         payload.put("reviewerId", reviewerId);
         events.publish(workspaceId, projectId, "merge_request.opened", Actor.agent(authorId), new Subject("merge_request", id), payload);
         return find(id).orElseThrow();
@@ -71,6 +72,11 @@ public class MergeRequestService {
                 UPDATE merge_requests SET status = coalesce(?, status), head_commit = coalesce(?, head_commit),
                        checks = coalesce(CAST(? AS jsonb), checks), updated_at = now() WHERE id = ?
                 """).params(status, headCommit, checks == null ? null : json.writeValueAsString(checks), id).update();
+    }
+
+    /** A resubmitted merge request goes where new work goes (develop once the project has it). */
+    public void retarget(String id, String target) {
+        jdbc.sql("UPDATE merge_requests SET target_branch = ?, updated_at = now() WHERE id = ?").params(target, id).update();
     }
 
     public void nextRound(String id, String reviewerId) {

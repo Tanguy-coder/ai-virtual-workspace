@@ -22,6 +22,8 @@ import org.springframework.stereotype.Service;
 @Service
 public class GitService {
     public static final String MAIN = "main";
+    /** Integration branch: agents' task branches start from it and merge into it; it reaches main with the CTO's approval. */
+    public static final String DEVELOP = "develop";
     private static final Duration TIMEOUT = Duration.ofSeconds(60);
     private static final Map<String, String> ENV = Map.of("GIT_TERMINAL_PROMPT", "0", "LC_ALL", "C");
 
@@ -38,7 +40,7 @@ public class GitService {
     }
 
     public static class GitException extends RuntimeException {
-        GitException(String message) {
+        public GitException(String message) {
             super(message);
         }
     }
@@ -74,8 +76,25 @@ public class GitService {
                 .optional().map(Path::of);
     }
 
+    /** Creates {@code develop} from main when the repository has none. Returns true when it was created. */
+    public boolean ensureDevelop(Path repo) {
+        if (hasBranch(repo, DEVELOP)) return false;
+        git(repo, "branch", DEVELOP, MAIN);
+        return true;
+    }
+
+    /** The branch task branches start from and merge into: develop, or main in a repository without develop. */
+    public String integrationBranch(Path repo) {
+        return hasBranch(repo, DEVELOP) ? DEVELOP : MAIN;
+    }
+
     /** The worktree of {@code branch}; the branch is created from main when it does not exist yet. */
     public Path worktree(Path repo, String projectId, String branch) {
+        return worktree(repo, projectId, branch, MAIN);
+    }
+
+    /** The worktree of {@code branch}; the branch is created from {@code base} when it does not exist yet. */
+    public Path worktree(Path repo, String projectId, String branch, String base) {
         Path dir = dataDir.resolve("worktrees").resolve(projectId).resolve(branch.replace('/', '_'));
         if (Files.isDirectory(dir) && Files.exists(dir.resolve(".git"))) return dir;
         try {
@@ -86,7 +105,7 @@ public class GitService {
         git(repo, "worktree", "prune");
         boolean exists = run(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch).ok();
         if (exists) git(repo, "worktree", "add", "-q", dir.toString(), branch);
-        else git(repo, "worktree", "add", "-q", "-b", branch, dir.toString(), MAIN);
+        else git(repo, "worktree", "add", "-q", "-b", branch, dir.toString(), base);
         return dir;
     }
 
@@ -153,7 +172,12 @@ public class GitService {
 
     /** Would merging {@code branch} into main conflict? Checked without touching any worktree. */
     public List<String> conflictsWithMain(Path repo, String branch) {
-        Processes.Result r = run(repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", MAIN, branch);
+        return conflicts(repo, MAIN, branch);
+    }
+
+    /** Would merging {@code branch} into {@code target} conflict? Checked without touching any worktree. */
+    public List<String> conflicts(Path repo, String target, String branch) {
+        Processes.Result r = run(repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", target, branch);
         if (r.exit() == 0) return List.of();
         if (r.exit() != 1) throw new GitException("git merge-tree failed: " + r.combined());
         List<String> files = new ArrayList<>();
@@ -166,9 +190,14 @@ public class GitService {
 
     /** Brings main into the branch's worktree. On conflict the markers stay in the files for the agent to resolve. */
     public MergeOutcome mergeMainInto(Path worktree, Author author) {
-        if (run(worktree, "merge-base", "--is-ancestor", MAIN, "HEAD").ok()) return new MergeOutcome(true, List.of());
+        return mergeBaseInto(worktree, MAIN, author);
+    }
+
+    /** Brings {@code base} into the branch's worktree. On conflict the markers stay in the files for the agent to resolve. */
+    public MergeOutcome mergeBaseInto(Path worktree, String base, Author author) {
+        if (run(worktree, "merge-base", "--is-ancestor", base, "HEAD").ok()) return new MergeOutcome(true, List.of());
         Processes.Result r = Processes.run(List.of("git", "-c", "user.name=" + author.name(), "-c", "user.email=" + author.email(),
-                "merge", "--no-edit", "-q", MAIN), worktree, TIMEOUT, ENV, null);
+                "merge", "--no-edit", "-q", base), worktree, TIMEOUT, ENV, null);
         if (r.ok()) return new MergeOutcome(true, List.of());
         String unmerged = git(worktree, "diff", "--name-only", "--diff-filter=U");
         List<String> files = unmerged.lines().filter(s -> !s.isBlank()).toList();
@@ -190,6 +219,27 @@ public class GitService {
             throw new GitException("The merge into main failed: " + r.combined());
         }
         return head(repo);
+    }
+
+    /**
+     * Merges {@code source} (a branch or a commit) into develop (no fast-forward), in develop's own worktree so the
+     * repository's main checkout is never switched. Returns the merge commit.
+     */
+    public String mergeIntoDevelop(Path repo, String projectId, String source, String message, Author author) {
+        ensureDevelop(repo);
+        Path dir = worktree(repo, projectId, DEVELOP, MAIN);
+        Processes.Result r = Processes.run(List.of("git", "-c", "user.name=" + author.name(), "-c", "user.email=" + author.email(),
+                "merge", "--no-ff", "-q", "-m", message, source), dir, TIMEOUT, ENV, null);
+        if (!r.ok()) {
+            run(dir, "merge", "--abort");
+            throw new GitException("The merge into develop failed: " + r.combined());
+        }
+        return head(dir);
+    }
+
+    /** Commits on {@code ref} that {@code base} does not have yet. */
+    public int ahead(Path repo, String base, String ref) {
+        return Integer.parseInt(git(repo, "rev-list", "--count", base + ".." + ref).strip());
     }
 
     public record Branch(String name, String head, int ahead, int behind, String lastSubject, String lastDate) {}

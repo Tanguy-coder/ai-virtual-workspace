@@ -94,7 +94,7 @@ public class TaskSplitter {
                 .filter(a -> "ACTIVE".equals(a.status()) && a.model() != null && a.providerId() != null).toList();
         Map<String, Agent> byName = team.stream().collect(Collectors.toMap(a -> a.name().toLowerCase(), Function.identity(), (a, b) -> a));
         TaskRun run = runs.openForTask(task.id()).orElse(null);
-        boolean committed = run != null && !git.changes(Path.of(run.worktree()), GitService.MAIN, "HEAD").isEmpty();
+        boolean committed = run != null && !git.changes(Path.of(run.worktree()), git.integrationBranch(Path.of(run.worktree())), "HEAD").isEmpty();
         long budget = execution.taskTokenBudget(task.projectId());
 
         StringBuilder sb = new StringBuilder();
@@ -110,7 +110,7 @@ public class TaskSplitter {
             sb.append("<work_so_far recorded_by=\"platform\">\n").append(execution.workStatus(run.agentId()));
             if (committed) {
                 sb.append("Committed on ").append(run.branch()).append(": ")
-                        .append(git.changes(Path.of(run.worktree()), GitService.MAIN, "HEAD").stream()
+                        .append(git.changes(Path.of(run.worktree()), git.integrationBranch(Path.of(run.worktree())), "HEAD").stream()
                                 .map(c -> c.status() + " " + c.path()).limit(40).collect(Collectors.joining(", "))).append("\n");
             }
             sb.append("</work_so_far>\n");

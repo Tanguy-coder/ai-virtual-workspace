@@ -82,10 +82,19 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
         }
         JsonNode choice = response.path("choices").get(0);
         String finish = choice.path("finish_reason").asString("unknown");
+        if ("length".equals(finish)) finish = "max_tokens"; // OpenAI's name for a reply cut off by max_tokens
         long prompt = response.path("usage").path("prompt_tokens").asLong(0);
         long cached = Math.min(prompt, response.path("usage").path("prompt_tokens_details").path("cached_tokens").asLong(0));
+        String content = choice.path("message").path("content").asString("");
+        JsonNode calls = choice.path("message").path("tool_calls");
+        if (content.isBlank() && calls.isArray() && !calls.isEmpty()) {
+            // Models trained on native tool calling (gpt-oss behind OpenRouter) may answer with tool calls although
+            // none was offered: they are kept as the answer, {"tool_calls": [{"name", "arguments"}]}, for the caller.
+            content = nativeCalls(calls);
+            if (!"max_tokens".equals(finish)) finish = "tool_calls";
+        }
         return new AdapterResult(
-                choice.path("message").path("content").asString(""),
+                content,
                 response.path("model").asString(request.model()),
                 prompt - cached,
                 response.path("usage").path("completion_tokens").asLong(0),
@@ -140,5 +149,21 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
 
     private static String abbreviate(String s) {
         return s == null ? "" : s.length() > 500 ? s.substring(0, 500) + "..." : s;
+    }
+
+    private static String nativeCalls(JsonNode calls) {
+        StringBuilder sb = new StringBuilder("{\"tool_calls\": [");
+        boolean first = true;
+        for (JsonNode c : calls) {
+            JsonNode fn = c.path("function");
+            if (!fn.path("name").isString()) continue;
+            String args = fn.path("arguments").isString() ? fn.path("arguments").asString() : fn.path("arguments").toString();
+            if (args.isBlank()) args = "{}";
+            if (!first) sb.append(", ");
+            sb.append("{\"name\": ").append(tools.jackson.databind.node.StringNode.valueOf(fn.path("name").asString()).toString())
+                    .append(", \"arguments\": ").append(args.strip().startsWith("{") ? args : tools.jackson.databind.node.StringNode.valueOf(args).toString()).append("}");
+            first = false;
+        }
+        return sb.append("]}").toString();
     }
 }

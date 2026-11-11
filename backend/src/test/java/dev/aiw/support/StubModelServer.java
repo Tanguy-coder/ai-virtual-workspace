@@ -42,11 +42,16 @@ public class StubModelServer implements AutoCloseable {
                 ex.close();
                 return;
             }
-            respond(ex, body -> """
+            // A responder answer starting with "RAW:" is the whole response body (e.g. native tool_calls).
+            respond(ex, body -> {
+                String answer = openAiResponder.apply(body);
+                if (answer.startsWith("RAW:")) return answer.substring(4);
+                return """
                 {"id":"c1","object":"chat.completion","model":"stub-model",
                  "choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],
                  "usage":{"prompt_tokens":1000,"completion_tokens":500,"total_tokens":1500}}
-                """.formatted(TestApi.JSON.writeValueAsString(openAiResponder.apply(body))));
+                """.formatted(TestApi.JSON.writeValueAsString(answer));
+            });
         });
         server.createContext("/v1/models", ex -> respond(ex, body -> """
                 {"object":"list","data":[{"id":"stub-large","object":"model"},{"id":"models/stub-small","object":"model"}]}

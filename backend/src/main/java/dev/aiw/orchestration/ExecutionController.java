@@ -116,7 +116,7 @@ class ExecutionController {
         String head = "MERGED".equals(mr.status()) && mr.mergedCommit() != null ? mr.mergedCommit() : mr.sourceBranch();
         List<GitService.FileChange> files = "MERGED".equals(mr.status()) && mr.mergedCommit() != null
                 ? git.changes(repo, mr.mergedCommit() + "^1", mr.mergedCommit())
-                : git.changes(repo, GitService.MAIN, head);
+                : git.changes(repo, mr.targetBranch(), head);
         List<TestRun> runsOfTask = tests.list(mr.projectId(), mr.taskId(), 20);
         return new MergeRequestView(mr, mrs.comments(mrId), files, runsOfTask);
     }
@@ -127,7 +127,7 @@ class ExecutionController {
         Path repo = git.repo(mr.projectId()).orElseThrow();
         String diff = "MERGED".equals(mr.status()) && mr.mergedCommit() != null
                 ? git.diff(repo, mr.mergedCommit() + "^1", mr.mergedCommit(), path)
-                : git.diff(repo, GitService.MAIN, mr.sourceBranch(), path);
+                : git.diff(repo, mr.targetBranch(), mr.sourceBranch(), path);
         return Map.of("diff", diff.length() > 400_000 ? diff.substring(0, 400_000) : diff);
     }
 
@@ -173,13 +173,14 @@ class ExecutionController {
         return Map.of("path", path, "ref", ref, "content", content.length() > 1_000_000 ? content.substring(0, 1_000_000) : content);
     }
 
-    /** Diff of a branch against main (Code view, "changes by task"). */
+    /** Diff of a branch against the branch it merges into: develop for task branches, main for develop. */
     @GetMapping("/api/v1/projects/{projectId}/repo/compare")
     Map<String, Object> compare(@PathVariable String projectId, @RequestParam String ref, @RequestParam(required = false) String path) {
         access.requireProject(projectId, WorkspaceRole.VIEWER);
         Path repo = git.repo(projectId).orElseThrow(() -> ApiException.notFound("Repository"));
         String r = safeRef(ref);
-        return Map.of("files", git.changes(repo, GitService.MAIN, r), "diff", path == null ? "" : git.diff(repo, GitService.MAIN, r, path));
+        String base = r.equals(GitService.DEVELOP) || r.equals(GitService.MAIN) ? GitService.MAIN : git.integrationBranch(repo);
+        return Map.of("files", git.changes(repo, base, r), "diff", path == null ? "" : git.diff(repo, base, r, path), "base", base);
     }
 
     // ---- tests

@@ -53,7 +53,8 @@ import tools.jackson.databind.json.JsonMapper;
  * Increment 4: agents execute their tasks (docs/10). A run is a chain of persisted steps, one agent job each:
  * the model decides a few tool calls, the platform executes them on the task's branch and in its sandbox.
  * On submission the platform checks conflicts and secrets and runs the tests itself; a teammate reviews; the
- * validation engine checks every gate; the CTO approves the merge into main. Only then is the task DONE.
+ * validation engine checks every gate; the Lead approves the merge into develop (the CTO when the Lead wrote the
+ * work). Only then is the task DONE. develop reaches main through {@link BranchFlow}, with the CTO's approval.
  */
 @Service
 public class TaskExecution {
@@ -99,12 +100,13 @@ public class TaskExecution {
     private final long tokenBudget;
     private final BudgetService budgets;
     private final MeetingService meetings;
+    private final BranchFlow branches;
 
     TaskExecution(TaskService tasks, TaskRuns runs, AgentTools tools, AgentRunner runner, AgentJobs jobs, AgentService agents,
                   CollaborationService collaboration, MemoryService memory, GitService git, SandboxService sandboxes,
                   TestRunService tests, MergeRequestService mrs, ApprovalService approvals, ProjectService projects,
                   EventPublisher events, AuditLog audit, TransactionTemplate tx, JdbcClient jdbc, JsonMapper json,
-                  BudgetService budgets, MeetingService meetings, dev.aiw.modelgateway.ModelGateway gateway,
+                  BudgetService budgets, MeetingService meetings, dev.aiw.modelgateway.ModelGateway gateway, BranchFlow branches,
                   @Value("${aiw.execution.auto-start:true}") boolean autoStart,
                   @Value("${aiw.execution.max-steps-per-segment:40}") int maxSegmentSteps,
                   @Value("${aiw.execution.token-budget:200000}") long tokenBudget) {
@@ -128,6 +130,7 @@ public class TaskExecution {
         this.jdbc = jdbc;
         this.json = json;
         this.gateway = gateway;
+        this.branches = branches;
         this.autoStart = autoStart;
         this.maxSegmentSteps = maxSegmentSteps;
         this.tokenBudget = tokenBudget;
@@ -165,7 +168,7 @@ public class TaskExecution {
         }
     }
 
-    /** Opens a run: branch from main, worktree, first step queued. The sandbox starts with the first step. */
+    /** Opens a run: branch from develop (the Lead creates it if needed), worktree, first step queued. The sandbox starts with the first step. */
     public TaskRun start(String taskId, Actor actor) {
         Task task = tasks.find(taskId).orElseThrow(() -> ApiException.notFound("Task"));
         if (!"ASSIGNED".equals(task.status())) {
@@ -178,18 +181,19 @@ public class TaskExecution {
         Project project = projects.find(task.projectId()).orElseThrow();
         String ws = tasks.workspaceOf(task);
         Path repo = git.ensureRepo(ws, project.id(), project.name(), project.description());
+        String from = branches.ensureDevelop(ws, project.id(), repo);
         // A task split from a bigger one may continue the work already committed on the original branch.
         String base = jdbc.sql("SELECT base_branch FROM tasks WHERE id = ?").param(taskId).query(String.class).optional().orElse(null);
         String branch = base != null && git.hasBranch(repo, base) ? base
                 : "agent/" + slug(agent.name(), 30) + "/t-" + task.number() + "-" + slug(task.title(), 32);
         long budget = taskTokenBudget(project.id());
-        Path worktree = git.worktree(repo, project.id(), branch);
+        Path worktree = git.worktree(repo, project.id(), branch, from);
         String image = SandboxService.imageFor(worktree);
         return tx.execute(s -> {
             TaskRun run = runs.create(ws, project.id(), taskId, agent.id(), branch, worktree.toString(), image, budget);
             tasks.advance(taskId, "IN_PROGRESS", actor, Map.of("runId", run.id(), "branch", branch));
             agents.setResting(agent.id(), "WORKING", null);
-            runs.step(run, "PLATFORM", null, (branch.equals(base) ? "Continues branch " + branch : "Branch " + branch + " created from main")
+            runs.step(run, "PLATFORM", null, (branch.equals(base) ? "Continues branch " + branch : "Branch " + branch + " created from " + from)
                             + " · sandbox " + image + " · budget " + budget + " tokens",
                     Map.of("branch", branch, "image", image), "OK", 0, 0, 0);
             events.publish(ws, project.id(), "task_run.started", actor, new Subject("task_run", run.id()),
@@ -264,7 +268,8 @@ public class TaskExecution {
             tx.executeWithoutResult(s -> {
                 runs.usage(run.id(), usage.input, usage.output, usage.cacheRead, usage.cost);
                 runs.step(run, "PLATFORM", null, UNUSABLE + e.getMessage(), Map.of("text", "Your reply could not be used: "
-                        + e.getMessage() + "\nIt began with:\n" + e.excerpt() + "\nReply with one valid JSON object only; "
+                        + e.getMessage() + (e.excerpt().isBlank() ? "\nYour reply was empty." : "\nIt began with:\n" + e.excerpt())
+                        + "\nReply with one valid JSON object only, in the message text (not a native tool call); "
                         + "keep file contents short (several file.edit calls rather than one large file.write)."),
                         "ERROR", usage.input, usage.output, ms);
             });
@@ -278,6 +283,12 @@ public class TaskExecution {
                     Map.of("actions", decision.path("actions").size(), "cacheRead", usage.cacheRead), "OK",
                     usage.input, usage.output, ms);
         });
+        if (decision.path(DROPPED).asInt(0) > 0) {
+            int dropped = decision.path(DROPPED).asInt();
+            tx.executeWithoutResult(s -> runs.step(run, "PLATFORM", null, "Only the first " + MAX_ACTIONS + " actions run",
+                    Map.of("text", "Your reply listed " + (MAX_ACTIONS + dropped) + " actions; the last " + dropped
+                            + " were not run. At most " + MAX_ACTIONS + " actions per reply."), "ERROR", 0, 0, 0));
+        }
 
         AgentTools.End end = AgentTools.End.NONE;
         String endText = null;
@@ -327,37 +338,60 @@ public class TaskExecution {
     private static final int UNUSABLE_LIMIT = 3;
 
     /** Unusable replies since the agent's last usable decision. */
+    static final int MAX_ACTIONS = 5;
+    static final String DROPPED = "_droppedActions";
+
+    /** Native tool names cannot contain dots: "file_write" is our "file.write". */
+    private static String toolName(String name) {
+        if (AgentTools.TOOLS.contains(name)) return name;
+        String dotted = name.replaceFirst("_", ".");
+        return AgentTools.TOOLS.contains(dotted) ? dotted : name;
+    }
+
     private int unusableInARow(TaskRun run) {
         int count = 0;
         List<RunStep> steps = runs.steps(run.id());
         for (int i = steps.size() - 1; i >= 0; i--) {
             RunStep st = steps.get(i);
-            if ("MODEL".equals(st.kind()) || "Resumed".equals(st.summary())) break;
+            // A model step, a resume or a block (then a retry) starts a new count.
+            if ("MODEL".equals(st.kind()) || "Resumed".equals(st.summary()) || st.summary().startsWith("Step failed")
+                    || st.summary().startsWith("Blocked")) break;
             if ("PLATFORM".equals(st.kind()) && st.summary().startsWith(UNUSABLE)) count++;
         }
         return count;
     }
 
     private void validateDecision(JsonNode node) {
-        // Models trained on native tool calling (Groq, some OpenRouter models) may answer with one call
-        // {"name": "repo.tree", "arguments": {...}} instead of our format: it is read as that single action.
-        if (node instanceof ObjectNode o && !o.has("actions") && o.path("name").isString()) {
-            ObjectNode action = json.createObjectNode().put("tool", o.path("name").asString());
-            JsonNode args = o.path("arguments");
-            if (args.isString()) {
-                try {
-                    args = json.readTree(args.asString());
-                } catch (RuntimeException e) {
-                    args = json.createObjectNode();
+        // Models trained on native tool calling (Groq, gpt-oss behind OpenRouter) may answer with native calls,
+        // {"name": "repo.tree", "arguments": {...}} or {"tool_calls": [...]}, instead of our format: read as the actions.
+        if (node instanceof ObjectNode o && !o.has("actions") && (o.path("name").isString() || o.path("tool_calls").isArray())) {
+            List<JsonNode> calls = new ArrayList<>();
+            if (o.path("name").isString()) calls.add(o);
+            else o.path("tool_calls").forEach(calls::add);
+            var list = o.putArray("actions");
+            for (JsonNode c : calls) {
+                ObjectNode action = json.createObjectNode().put("tool", toolName(c.path("name").asString("")));
+                JsonNode args = c.path("arguments");
+                if (args.isString()) {
+                    try {
+                        args = json.readTree(args.asString());
+                    } catch (RuntimeException e) {
+                        args = json.createObjectNode();
+                    }
                 }
+                action.set("args", args.isObject() ? args : json.createObjectNode());
+                list.add(action);
             }
-            action.set("args", args.isObject() ? args : json.createObjectNode());
-            o.putArray("actions").add(action);
-            if (!o.has("thought")) o.put("thought", "Calls " + o.path("name").asString() + ".");
+            if (!o.has("thought")) o.put("thought", "Calls " + calls.stream().map(c -> toolName(c.path("name").asString(""))).collect(java.util.stream.Collectors.joining(", ")) + ".");
         }
         JsonNode actions = node.path("actions");
         if (!actions.isArray() || actions.isEmpty()) throw new AgentRunner.InvalidOutput("\"actions\" must list 1 to 5 actions.");
-        if (actions.size() > 5) throw new AgentRunner.InvalidOutput("At most 5 actions per reply.");
+        if (actions.size() > MAX_ACTIONS && node instanceof ObjectNode o && actions instanceof tools.jackson.databind.node.ArrayNode arr) {
+            // Too many actions: the first ones run, the agent is told the rest did not (rather than losing the reply).
+            int dropped = arr.size() - MAX_ACTIONS;
+            while (arr.size() > MAX_ACTIONS) arr.remove(arr.size() - 1);
+            o.put(DROPPED, dropped);
+        }
         for (JsonNode a : actions) {
             String tool = a.path("tool").asString("");
             if (!AgentTools.TOOLS.contains(tool)) {
@@ -392,7 +426,7 @@ public class TaskExecution {
         brief(task, agent).ifPresent(b -> sb.append("<brief from=\"Lead\">\n").append(b).append("\n</brief>\n"));
         Path wt = Path.of(run.worktree());
         sb.append("<repository branch=\"").append(run.branch()).append("\">\n");
-        List<GitService.FileChange> changes = git.changes(wt, GitService.MAIN, "HEAD");
+        List<GitService.FileChange> changes = git.changes(wt, git.integrationBranch(wt), "HEAD");
         sb.append(changes.isEmpty() ? "No committed change on your branch yet.\n"
                 : "Committed on your branch: " + changes.stream().map(c -> c.status() + " " + c.path()).reduce((a, b) -> a + ", " + b).orElse("") + "\n");
         if (git.dirty(wt)) sb.append("You have uncommitted changes.\n");
@@ -726,7 +760,7 @@ public class TaskExecution {
     // ================================================================== submission
 
     /**
-     * The platform's checks on a submission, in order: commit leftovers, bring main in (conflicts), secrets, tests.
+     * The platform's checks on a submission, in order: commit leftovers, bring develop in (conflicts), secrets, tests.
      * Any problem goes back to the agent as a new item; otherwise a merge request opens and a teammate reviews.
      */
     private void submit(TaskRun run, Task task, Agent agent, String summary) {
@@ -734,20 +768,23 @@ public class TaskExecution {
         GitService.Author author = author(agent);
         git.commitAll(wt, "T-" + task.number() + ": " + firstLine(summary, task.title()), author);
         String ws = runs.workspaceOf(run);
+        // Work started before the develop branch existed also goes through it.
+        git.repo(run.projectId()).ifPresent(repo -> branches.ensureDevelop(ws, run.projectId(), repo));
+        String target = git.integrationBranch(wt);
 
-        GitService.MergeOutcome merged = git.mergeMainInto(wt, author);
+        GitService.MergeOutcome merged = git.mergeBaseInto(wt, target, author);
         if (!merged.clean()) {
-            back(run, "Conflicts with main in " + String.join(", ", merged.conflicts()),
-                    "main changed since your branch started and conflicts with your work in: " + String.join(", ", merged.conflicts())
+            back(run, "Conflicts with " + target + " in " + String.join(", ", merged.conflicts()),
+                    target + " changed since your branch started and conflicts with your work in: " + String.join(", ", merged.conflicts())
                             + ".\nThe files contain conflict markers (<<<<<<< ======= >>>>>>>). Keep both intents, remove the markers, "
                             + "run the tests, git.commit, then task.submit again.");
             return;
         }
-        if (git.changes(wt, GitService.MAIN, "HEAD").isEmpty()) {
-            back(run, "Nothing to submit", "Your branch has no change compared to main.");
+        if (git.changes(wt, target, "HEAD").isEmpty()) {
+            back(run, "Nothing to submit", "Your branch has no change compared to " + target + ".");
             return;
         }
-        List<SecretScan.Finding> secrets = SecretScan.scan(git.diff(wt, GitService.MAIN, "HEAD", null));
+        List<SecretScan.Finding> secrets = SecretScan.scan(git.diff(wt, target, "HEAD", null));
         if (!secrets.isEmpty()) {
             back(run, "Secret found in the diff", "Remove these credentials from the code (use configuration instead): "
                     + secrets.stream().map(f -> f.kind() + " in " + f.file()).reduce((a, b) -> a + "; " + b).orElse(""));
@@ -767,17 +804,18 @@ public class TaskExecution {
         if (!tr.succeeded()) {
             tx.executeWithoutResult(s -> tasks.advance(task.id(), "IN_PROGRESS", Actor.system(), Map.of()));
             back(run, "Tests " + tr.status().toLowerCase() + " on submission (tr-" + tr.number() + ")",
-                    "The platform ran `" + tr.command() + "` on your branch merged with main:\n" + tr.failingExcerpt());
+                    "The platform ran `" + tr.command() + "` on your branch merged with " + target + ":\n" + tr.failingExcerpt());
             return;
         }
-        Optional<Agent> reviewer = reviewerFor(task, agent);
+        Optional<Agent> reviewer = reviewerFor(task, agent, target);
         tx.executeWithoutResult(s -> {
             MergeRequest mr = mrs.openForTask(task.id()).map(existing -> {
                 mrs.update(existing.id(), "IN_REVIEW", head, null);
+                mrs.retarget(existing.id(), target);
                 mrs.nextRound(existing.id(), reviewer.map(Agent::id).orElse(null));
                 return mrs.find(existing.id()).orElseThrow();
             }).orElseGet(() -> {
-                MergeRequest opened = mrs.open(ws, run.projectId(), task.id(), run.id(), run.branch(), agent.id(),
+                MergeRequest opened = mrs.open(ws, run.projectId(), task.id(), run.id(), run.branch(), target, agent.id(),
                         reviewer.map(Agent::id).orElse(null), "T-" + task.number() + " " + task.title(), summary == null ? "" : summary, head);
                 mrs.nextRound(opened.id(), reviewer.map(Agent::id).orElse(null));
                 return mrs.find(opened.id()).orElseThrow();
@@ -801,11 +839,18 @@ public class TaskExecution {
         });
     }
 
-    /** Another active agent: QA first, then the author's department, then anyone but the Lead, then the Lead. */
-    private Optional<Agent> reviewerFor(Task task, Agent author) {
+    /**
+     * Into develop, the Lead reviews and its approval is the merge decision (CTO requirement, 2026-11-11). When the Lead
+     * wrote the work, or for main: QA first, then the author's department, then anyone but the Lead, then the Lead.
+     */
+    private Optional<Agent> reviewerFor(Task task, Agent author, String target) {
         List<Agent> candidates = agents.list(task.projectId()).stream()
                 .filter(a -> !a.id().equals(author.id()) && "ACTIVE".equals(a.status()) && a.providerId() != null && a.model() != null)
                 .toList();
+        if (GitService.DEVELOP.equals(target)) {
+            Optional<Agent> lead = candidates.stream().filter(Agent::lead).findFirst();
+            if (lead.isPresent()) return lead;
+        }
         return candidates.stream().min(Comparator.comparingInt(a -> a.department().name().equals("QA") ? 0
                 : a.department() == author.department() ? 1 : a.lead() ? 3 : 2));
     }
@@ -819,11 +864,12 @@ public class TaskExecution {
         Task task = tasks.find(mr.taskId()).orElseThrow();
         TaskRun run = runs.find(mr.runId()).orElseThrow();
         Path repo = git.repo(mr.projectId()).orElseThrow();
-        String diff = git.diff(repo, GitService.MAIN, mr.sourceBranch(), null);
+        String diff = git.diff(repo, mr.targetBranch(), mr.sourceBranch(), null);
         TestRun tr = tests.list(mr.projectId(), task.id(), 1).stream().findFirst().orElse(null);
         String testOutput = tr == null ? "" : tests.output(tr.id()).map(o -> lastLines(o, 40)).orElse("");
         StringBuilder sb = new StringBuilder();
-        sb.append("You review merge request !").append(mr.number()).append(" for task T-").append(task.number())
+        sb.append("You review merge request !").append(mr.number()).append(" into ").append(mr.targetBranch())
+                .append(" for task T-").append(task.number())
                 .append(" \"").append(task.title()).append("\", written by ").append(agents.find(mr.authorAgentId()).map(Agent::name).orElse("a teammate"))
                 .append(".\n<summary_from_author>\n").append(mr.summary()).append("\n</summary_from_author>\n");
         sb.append("<acceptance_criteria>\n");
@@ -926,19 +972,28 @@ public class TaskExecution {
             }
             Map<String, Object> checks = gates(mr, task, criteria);
             boolean green = checks.values().stream().allMatch(v -> "ok".equals(((Map<?, ?>) v).get("status")));
+            // Into develop the Lead's approval is the merge decision; the CTO decides for main and for the Lead's own work.
+            boolean leadDecides = reviewer.kind() == Actor.Kind.AGENT && GitService.DEVELOP.equals(mr.targetBranch())
+                    && agents.find(reviewer.id()).map(Agent::lead).orElse(false);
+            boolean decided = reviewer.kind() == Actor.Kind.HUMAN || leadDecides;
             mrs.update(mr.id(), green ? "AWAITING_APPROVAL" : "IN_REVIEW", null, checks);
-            runs.step(run, "PLATFORM", null, "Approved by " + reviewerName + (green ? " · waiting for the CTO to merge" : " · a gate is not green"),
+            runs.step(run, "PLATFORM", null, "Approved by " + reviewerName + (!green ? " · a gate is not green"
+                            : decided ? " · merging into " + mr.targetBranch() : " · waiting for the CTO to merge into " + mr.targetBranch()),
                     Map.of("checks", checks), "OK", 0, 0, 0);
             if (!green) return;
             tasks.advance(task.id(), "VALIDATION", reviewer, Map.of("mrId", mr.id()));
-            if (reviewer.kind() == Actor.Kind.HUMAN) {
-                // The CTO reviewed and approved: that is the merge approval too.
-                audit.record(ws, reviewer, MERGE_ACTION, "merge_request", mr.id(), AuditLog.Decision.APPROVED, Map.of("number", String.valueOf(mr.number())));
-                jobs.enqueue(ws, mr.projectId(), run.agentId(), MERGE, Map.of("mrId", mr.id(), "userId", reviewer.id()), mr.id());
+            if (decided) {
+                // The CTO, or the Lead into develop, reviewed and approved: that is the merge approval too.
+                audit.record(ws, reviewer, MERGE_ACTION, "merge_request", mr.id(), AuditLog.Decision.APPROVED,
+                        Map.of("number", String.valueOf(mr.number()), "into", mr.targetBranch()));
+                Map<String, Object> job = new HashMap<>();
+                job.put("mrId", mr.id());
+                if (reviewer.kind() == Actor.Kind.HUMAN) job.put("userId", reviewer.id());
+                jobs.enqueue(ws, mr.projectId(), run.agentId(), MERGE, job, mr.id());
             } else {
                 String approvalId = approvals.request(ws, mr.projectId(), reviewer, MERGE_ACTION, "merge_request", mr.id(),
-                        "Merge !" + mr.number() + " " + mr.title() + " into main",
-                        Map.of("number", mr.number(), "branch", mr.sourceBranch(), "taskId", task.id()));
+                        "Merge !" + mr.number() + " " + mr.title() + " into " + mr.targetBranch(),
+                        Map.of("number", mr.number(), "branch", mr.sourceBranch(), "into", mr.targetBranch(), "taskId", task.id()));
                 mrs.setApproval(mr.id(), approvalId);
             }
         });
@@ -958,9 +1013,9 @@ public class TaskExecution {
         g.put("tests", gate(tr != null && tr.succeeded(), tr == null ? "not run" : "tr-" + tr.number() + " · " + tr.status().toLowerCase()
                 + (tr.passed() == null ? "" : " · " + tr.passed() + " passed")));
         Path repo = git.repo(mr.projectId()).orElseThrow();
-        List<SecretScan.Finding> secrets = SecretScan.scan(git.diff(repo, GitService.MAIN, mr.sourceBranch(), null));
+        List<SecretScan.Finding> secrets = SecretScan.scan(git.diff(repo, mr.targetBranch(), mr.sourceBranch(), null));
         g.put("secrets", gate(secrets.isEmpty(), secrets.isEmpty() ? "clean" : secrets.size() + " finding(s)"));
-        List<String> conflicts = git.conflictsWithMain(repo, mr.sourceBranch());
+        List<String> conflicts = git.conflicts(repo, mr.targetBranch(), mr.sourceBranch());
         g.put("conflicts", gate(conflicts.isEmpty(), conflicts.isEmpty() ? "none" : String.join(", ", conflicts)));
         g.put("review", gate(true, "approved"));
         long met = criteria.stream().filter(Task.Criterion::met).count();
@@ -994,7 +1049,7 @@ public class TaskExecution {
         jobs.enqueue(e.workspaceId(), mr.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
     }
 
-    /** Re-checks against the current main (tests again if main moved), merges, closes the task. */
+    /** Re-checks against the current target (tests again if it moved), merges, closes the task. */
     void merge(AgentJob job) {
         MergeRequest mr = mrs.find(job.string("mrId")).orElseThrow();
         if (!"AWAITING_APPROVAL".equals(mr.status())) return;
@@ -1005,37 +1060,44 @@ public class TaskExecution {
         Path repo = git.repo(mr.projectId()).orElseThrow();
         Path wt = Path.of(run.worktree());
         String ws = runs.workspaceOf(run);
-        if (!git.revParse(repo, GitService.MAIN).equals(git.revParse(wt, "HEAD")) && !mainIncluded(wt)) {
-            GitService.MergeOutcome m = git.mergeMainInto(wt, author(author));
+        String target = mr.targetBranch();
+        if (!git.revParse(repo, target).equals(git.revParse(wt, "HEAD")) && !baseIncluded(wt, target)) {
+            GitService.MergeOutcome m = git.mergeBaseInto(wt, target, author(author));
             if (!m.clean()) {
-                reopen(mr, task, run, "main moved before the merge and now conflicts in " + String.join(", ", m.conflicts())
+                reopen(mr, task, run, target + " moved before the merge and now conflicts in " + String.join(", ", m.conflicts())
                         + ". Resolve the markers, test, commit and submit again.");
                 return;
             }
             Optional<TestRun> again = tests.run(new TestRunService.Context(ws, mr.projectId(), task.id(), run.id(), mr.id(),
                     run.branch(), git.head(wt), "pre-merge"), ensureSandbox(run), wt);
             if (again.isPresent() && !again.get().succeeded()) {
-                reopen(mr, task, run, "After bringing in the latest main, the tests fail (tr-" + again.get().number() + "):\n" + again.get().failingExcerpt());
+                reopen(mr, task, run, "After bringing in the latest " + target + ", the tests fail (tr-" + again.get().number() + "):\n" + again.get().failingExcerpt());
                 return;
             }
         }
-        String commit = git.mergeIntoMain(repo, run.branch(), "Merge !" + mr.number() + ": " + mr.title(), GitService.Author.PLATFORM);
+        String message = "Merge !" + mr.number() + ": " + mr.title();
+        String commit = GitService.DEVELOP.equals(target)
+                ? git.mergeIntoDevelop(repo, mr.projectId(), run.branch(), message, GitService.Author.PLATFORM)
+                : git.mergeIntoMain(repo, run.branch(), message, GitService.Author.PLATFORM);
         sandboxes.stop(run.sandboxId());
         tx.executeWithoutResult(s -> {
             mrs.markMerged(mr.id(), commit, userId);
-            events.publish(ws, mr.projectId(), "merge_request.merged", userId == null ? Actor.system() : Actor.human(userId),
-                    new Subject("merge_request", mr.id()), Map.of("number", mr.number(), "commit", commit, "taskId", task.id()));
-            runs.step(run, "PLATFORM", null, "Merged into main as " + commit.substring(0, 7) + " · task done", Map.of("commit", commit), "OK", 0, 0, 0);
+            Actor merger = userId != null ? Actor.human(userId)
+                    : mr.reviewerAgentId() != null ? Actor.agent(mr.reviewerAgentId()) : Actor.system();
+            events.publish(ws, mr.projectId(), "merge_request.merged", merger, new Subject("merge_request", mr.id()),
+                    Map.of("number", mr.number(), "commit", commit, "taskId", task.id(), "into", target));
+            runs.step(run, "PLATFORM", null, "Merged into " + target + " as " + commit.substring(0, 7) + " · task done", Map.of("commit", commit), "OK", 0, 0, 0);
             runs.status(run, "DONE", null);
             tasks.complete(task.id(), Actor.system(), Map.of("mrId", mr.id(), "commit", commit));
             if (!runs.agentBusy(author.id())) agents.setResting(author.id(), "AVAILABLE", null);
         });
         git.removeWorktree(repo, wt);
+        if (GitService.DEVELOP.equals(target)) branches.afterTaskMerged(ws, mr.projectId());
     }
 
-    private boolean mainIncluded(Path wt) {
+    private boolean baseIncluded(Path wt, String base) {
         try {
-            return git.changes(wt, "HEAD", GitService.MAIN).isEmpty();
+            return git.changes(wt, "HEAD", base).isEmpty();
         } catch (GitService.GitException e) {
             return false;
         }
@@ -1046,7 +1108,7 @@ public class TaskExecution {
             mrs.update(mr.id(), "CHANGES_REQUESTED", null, null);
             tasks.advance(task.id(), "IN_PROGRESS", Actor.system(), Map.of("mrId", mr.id()));
             runs.status(run, "RUNNING", null);
-            runs.step(run, "PLATFORM", null, "Merge stopped: main moved", Map.of("text", text), "ERROR", 0, 0, 0);
+            runs.step(run, "PLATFORM", null, "Merge stopped: the target branch moved", Map.of("text", text), "ERROR", 0, 0, 0);
             agents.setResting(run.agentId(), "WORKING", null);
             jobs.enqueue(runs.workspaceOf(run), mr.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
         });

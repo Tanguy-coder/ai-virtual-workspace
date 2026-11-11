@@ -38,7 +38,7 @@ class AgentTools {
               Package installs (npm install, pip install) get network access; nothing else does.
             - git.commit {"message": "..."}: commit everything on your branch.
             - task.submit {"summary": "what you did and how each acceptance criterion is proven"}: the platform runs the \
-            tests, a teammate reviews, the CTO approves the merge. Commit first.
+            tests, then asks the Lead to review: if the Lead approves, your branch merges into develop. Commit first.
             - task.block {"reason": "..."}: you cannot continue without someone else; the Lead is told.
             - message.send {"to": "Lead or an exact teammate name", "content": "..."}
             - memory.record {"title": "...", "content": "..."}: a decision the whole team must know.
