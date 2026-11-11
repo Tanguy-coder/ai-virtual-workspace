@@ -9,6 +9,11 @@ import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -19,7 +24,22 @@ import org.springframework.transaction.support.TransactionTemplate;
  */
 @Service
 public class ModelGateway {
+    private static final Logger log = LoggerFactory.getLogger(ModelGateway.class);
     private static final BigDecimal[] THRESHOLDS = {new BigDecimal("0.8"), BigDecimal.ONE};
+    /** Rate-limited calls are retried this many times, waiting what the provider asks (small plans: Groq, OpenRouter). */
+    private static final int RATE_LIMIT_RETRIES = 4;
+    private static final long MAX_WAIT_SECONDS = 60;
+    /** Below this, a request shrunk to fit the provider's per-minute limit could not produce a useful answer. */
+    private static final long MIN_OUTPUT_TOKENS = 512;
+    private static final Pattern LIMIT = Pattern.compile("Limit (\\d+),(?: Used \\d+,)? Requested (\\d+)");
+    /** A model's own output ceiling ("max_tokens must be less than or equal to `512`"). */
+    private static final Pattern MODEL_MAX = Pattern.compile("max_tokens`? must be less than or equal to `?(\\d+)");
+    /** OpenRouter credits: "You requested up to 8000 tokens, but can only afford 2395". */
+    private static final Pattern AFFORD = Pattern.compile("can only afford (\\d+)");
+    private static final Pattern TRY_AGAIN = Pattern.compile("try again in (?:(\\d+)m)?([\\d.]+)(ms|s)");
+
+    /** Output cap learned per provider and model from "request too large" answers (output tokens per minute). */
+    private final Map<String, Long> outputCaps = new ConcurrentHashMap<>();
 
     private final ProviderService providers;
     private final PricingService pricing;
@@ -44,6 +64,8 @@ public class ModelGateway {
         if (request.tier() == ModelRequest.Tier.LIGHT && provider.economyModel() != null) {
             request = request.withModel(provider.economyModel());
         }
+        Long cap = outputCaps.get(provider.id() + "|" + request.model());
+        if (cap != null && request.maxTokens() > cap) request = request.withMaxTokens(cap);
         ModelRequest req = request;
 
         // Memoized answer: an identical request in the last 24 h is not sent again (retries, replays).
@@ -66,14 +88,23 @@ public class ModelGateway {
         ModelAdapter adapter = providers.adapter(provider.kind());
 
         long start = System.nanoTime();
-        AdapterResult result;
-        try {
-            result = adapter.call(provider.id(), provider.baseUrl(), apiKey, req);
-        } catch (ModelCallException e) {
-            long latency = (System.nanoTime() - start) / 1_000_000;
-            record(req, provider, req.model(), 0, 0, 0, 0, null, latency, "ERROR", e.getMessage());
-            throw e;
+        AdapterResult called;
+        ModelRequest sent = req;
+        for (int attempt = 0; ; attempt++) {
+            try {
+                called = adapter.call(provider.id(), provider.baseUrl(), apiKey, sent);
+                break;
+            } catch (ModelCallException e) {
+                ModelRequest retry = attempt < RATE_LIMIT_RETRIES ? afterRateLimit(provider, sent, e, attempt) : null;
+                if (retry == null) {
+                    long latency = (System.nanoTime() - start) / 1_000_000;
+                    record(req, provider, req.model(), 0, 0, 0, 0, null, latency, "ERROR", e.getMessage());
+                    throw e;
+                }
+                sent = retry;
+            }
         }
+        AdapterResult result = called;
         long latency = (System.nanoTime() - start) / 1_000_000;
         BigDecimal readFactor = provider.kind() == ProviderKind.ANTHROPIC ? new BigDecimal("0.1") : new BigDecimal("0.5");
         BigDecimal cost = pricing.find(req.workspaceId(), provider.kind(), result.servedModel())
@@ -94,6 +125,82 @@ public class ModelGateway {
         return new ModelResult(result.text(), result.servedModel(), result.inputTokens(), result.outputTokens(),
                 result.refused(), result.stopReason(), latency, cost, result.cacheWriteTokens(), result.cacheReadTokens(), false,
                 req.projectId(), hash);
+    }
+
+    /**
+     * What to do after a rate-limit answer (429/413): the same request after the wait the provider asks, or a smaller
+     * one when it is larger than the per-minute limit itself. Null: not a rate limit, or nothing can make it fit.
+     */
+    ModelRequest afterRateLimit(Provider provider, ModelRequest request, ModelCallException e, int attempt) {
+        String message = e.getMessage() == null ? "" : e.getMessage();
+        String key = provider.id() + "|" + request.model();
+        Matcher modelMax = MODEL_MAX.matcher(message);
+        if (e.statusCode() == 400 && modelMax.find()) {
+            long max = Long.parseLong(modelMax.group(1));
+            if (max >= request.maxTokens() || max < 1) return null;
+            outputCaps.put(key, max);
+            log.info("{} {}: the model allows max_tokens {} at most; remembered", provider.name(), request.model(), max);
+            return request.withMaxTokens(max);
+        }
+        if (e.statusCode() == 402) {
+            Matcher afford = AFFORD.matcher(message);
+            if (afford.find()) {
+                long max = Long.parseLong(afford.group(1)) * 9 / 10;
+                if (max < MIN_OUTPUT_TOKENS || max >= request.maxTokens()) {
+                    throw new ModelCallException("The " + provider.name() + " credits are nearly exhausted (room for "
+                            + afford.group(1) + " output tokens). Add credits or choose another provider.", 402, e);
+                }
+                log.info("{} {}: credits allow {} output tokens; retried smaller", provider.name(), request.model(), max);
+                return request.withMaxTokens(max);
+            }
+            if (!message.contains("in_flight")) return null;
+            // Credits held by requests still in flight: wait for them like a rate limit.
+        } else if (e.statusCode() != 429 && e.statusCode() != 413) {
+            return null;
+        }
+        Matcher limit = LIMIT.matcher(message);
+        boolean tooLarge = message.contains("Request too large") || message.contains("exceed the enforced limit");
+        if (tooLarge && limit.find()) {
+            long allowed = Long.parseLong(limit.group(1)), requested = Long.parseLong(limit.group(2));
+            boolean outputLimit = message.contains("output tokens");
+            long max = outputLimit ? allowed : request.maxTokens() - (requested - allowed) - 64;
+            if (max < MIN_OUTPUT_TOKENS || max >= request.maxTokens()) {
+                throw new ModelCallException("This request needs more tokens per minute than " + provider.name()
+                        + " allows for " + request.model() + " (limit " + allowed + ", needed " + requested
+                        + "). Choose a model with higher limits or raise the plan.", e.statusCode(), e);
+            }
+            if (outputLimit) outputCaps.put(key, max);
+            log.info("{} {}: request above the per-minute limit, retried with max_tokens {}", provider.name(), request.model(), max);
+            return request.withMaxTokens(max);
+        }
+        if (tooLarge) return null;
+        long wait = e.retryAfterSeconds();
+        Matcher again = TRY_AGAIN.matcher(message);
+        if (wait < 0 && again.find()) {
+            double v = Double.parseDouble(again.group(2));
+            double secs = "ms".equals(again.group(3)) ? v / 1000 : v;
+            wait = (long) Math.ceil(secs + (again.group(1) == null ? 0 : Long.parseLong(again.group(1)) * 60));
+        }
+        if (wait < 0) wait = 5L << attempt; // 5, 10, 20, 40 s
+        if (wait > MAX_WAIT_SECONDS) return null;
+        log.info("{} {}: rate limited, waiting {} s (attempt {})", provider.name(), request.model(), wait, attempt + 1);
+        sleep(wait * 1000 + 250);
+        return request;
+    }
+
+    /** Output ceiling learned for this provider and model, if any (small plans: Groq, OpenRouter free tiers). */
+    public java.util.Optional<Long> outputCap(String providerId, String model) {
+        return java.util.Optional.ofNullable(outputCaps.get(providerId + "|" + model));
+    }
+
+    /** Overridable so tests do not wait. */
+    void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new ModelCallException("Interrupted while waiting for the provider's rate limit", 429, ie);
+        }
     }
 
     /** Drops a memoized answer the caller could not use, so a retry asks the model again. */

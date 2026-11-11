@@ -46,6 +46,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -81,6 +82,7 @@ public class TaskExecution {
     private final TransactionTemplate tx;
     private final JdbcClient jdbc;
     private final JsonMapper json;
+    private final dev.aiw.modelgateway.ModelGateway gateway;
     private final boolean autoStart;
     private final int maxSegmentSteps;
     private final long tokenBudget;
@@ -91,7 +93,7 @@ public class TaskExecution {
                   CollaborationService collaboration, MemoryService memory, GitService git, SandboxService sandboxes,
                   TestRunService tests, MergeRequestService mrs, ApprovalService approvals, ProjectService projects,
                   EventPublisher events, AuditLog audit, TransactionTemplate tx, JdbcClient jdbc, JsonMapper json,
-                  BudgetService budgets, MeetingService meetings,
+                  BudgetService budgets, MeetingService meetings, dev.aiw.modelgateway.ModelGateway gateway,
                   @Value("${aiw.execution.auto-start:true}") boolean autoStart,
                   @Value("${aiw.execution.max-steps-per-segment:40}") int maxSegmentSteps,
                   @Value("${aiw.execution.token-budget:200000}") long tokenBudget) {
@@ -114,6 +116,7 @@ public class TaskExecution {
         this.tx = tx;
         this.jdbc = jdbc;
         this.json = json;
+        this.gateway = gateway;
         this.autoStart = autoStart;
         this.maxSegmentSteps = maxSegmentSteps;
         this.tokenBudget = tokenBudget;
@@ -273,6 +276,22 @@ public class TaskExecution {
     }
 
     private void validateDecision(JsonNode node) {
+        // Models trained on native tool calling (Groq, some OpenRouter models) may answer with one call
+        // {"name": "repo.tree", "arguments": {...}} instead of our format: it is read as that single action.
+        if (node instanceof ObjectNode o && !o.has("actions") && o.path("name").isString()) {
+            ObjectNode action = json.createObjectNode().put("tool", o.path("name").asString());
+            JsonNode args = o.path("arguments");
+            if (args.isString()) {
+                try {
+                    args = json.readTree(args.asString());
+                } catch (RuntimeException e) {
+                    args = json.createObjectNode();
+                }
+            }
+            action.set("args", args.isObject() ? args : json.createObjectNode());
+            o.putArray("actions").add(action);
+            if (!o.has("thought")) o.put("thought", "Calls " + o.path("name").asString() + ".");
+        }
         JsonNode actions = node.path("actions");
         if (!actions.isArray() || actions.isEmpty()) throw new AgentRunner.InvalidOutput("\"actions\" must list 1 to 5 actions.");
         if (actions.size() > 5) throw new AgentRunner.InvalidOutput("At most 5 actions per reply.");
@@ -363,6 +382,10 @@ public class TaskExecution {
             sb.append(" Your budget is nearly spent: commit what works and task.submit if the criteria are proven; otherwise "
                     + "task.block and say precisely what remains, so the Lead can split it into smaller tasks.");
         }
+        gateway.outputCap(agent.providerId(), agent.model()).filter(cap -> cap < 4_000).ifPresent(cap -> sb.append(
+                " Your model can write about ").append(cap).append(" tokens per reply: keep each reply small, create files in "
+                + "parts (file.write a skeleton, then file.edit) and never write more than about ").append(cap * 3)
+                .append(" characters of content in one reply."));
         sb.append(" Decide your next actions.");
         return sb.toString();
     }

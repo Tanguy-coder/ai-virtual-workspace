@@ -23,14 +23,31 @@ public class StubModelServer implements AutoCloseable {
     public volatile Function<String, String> anthropicResponder = body -> "OK";
     /** Input tokens the Anthropic endpoint reports per call (budgets can be exhausted on purpose). */
     public volatile int anthropicInputTokens = 12;
+    /** Content the OpenAI-compatible endpoint answers for a given request body. */
+    public volatile Function<String, String> openAiResponder = body -> "Hello from stub";
+    /** Error answers {status, body} the OpenAI-compatible endpoint gives first, one per request (rate limits...). */
+    public final java.util.Queue<Object[]> openAiErrors = new java.util.concurrent.ConcurrentLinkedQueue<>();
 
     public StubModelServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/v1/chat/completions", ex -> respond(ex, body -> """
+        server.createContext("/v1/chat/completions", ex -> {
+            Object[] error = openAiErrors.poll();
+            if (error != null) {
+                requests.add(new Captured(ex.getRequestURI().getPath(), Map.copyOf(ex.getRequestHeaders()),
+                        new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
+                byte[] bytes = ((String) error[1]).getBytes(StandardCharsets.UTF_8);
+                ex.getResponseHeaders().add("Content-Type", "application/json");
+                ex.sendResponseHeaders((Integer) error[0], bytes.length);
+                ex.getResponseBody().write(bytes);
+                ex.close();
+                return;
+            }
+            respond(ex, body -> """
                 {"id":"c1","object":"chat.completion","model":"stub-model",
-                 "choices":[{"index":0,"message":{"role":"assistant","content":"Hello from stub"},"finish_reason":"stop"}],
+                 "choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],
                  "usage":{"prompt_tokens":1000,"completion_tokens":500,"total_tokens":1500}}
-                """));
+                """.formatted(TestApi.JSON.writeValueAsString(openAiResponder.apply(body))));
+        });
         server.createContext("/v1/models", ex -> respond(ex, body -> """
                 {"object":"list","data":[{"id":"stub-large","object":"model"},{"id":"models/stub-small","object":"model"}]}
                 """));

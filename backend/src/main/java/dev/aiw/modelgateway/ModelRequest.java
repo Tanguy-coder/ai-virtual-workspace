@@ -28,6 +28,11 @@ public record ModelRequest(String workspaceId, String projectId, String agentId,
         this(workspaceId, projectId, agentId, providerId, model, null, system, turns, maxTokens, effort, Tier.STANDARD, Cache.NONE);
     }
 
+    ModelRequest withMaxTokens(long max) {
+        return new ModelRequest(workspaceId, projectId, agentId, providerId, model, systemPrefix, system, turns, max,
+                effort, tier, cache);
+    }
+
     ModelRequest withModel(String other) {
         return new ModelRequest(workspaceId, projectId, agentId, providerId, other, systemPrefix, system, turns, maxTokens,
                 effort, tier, cache);

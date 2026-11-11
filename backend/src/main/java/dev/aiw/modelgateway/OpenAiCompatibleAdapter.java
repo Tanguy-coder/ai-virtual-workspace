@@ -65,8 +65,15 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
             if (apiKey != null && !apiKey.isBlank()) spec.header("Authorization", "Bearer " + apiKey);
             response = spec.retrieve().body(JsonNode.class);
         } catch (RestClientResponseException e) {
+            String failed = failedToolGeneration(e);
+            if (failed != null) {
+                // Groq-style "tool_use_failed": the model answered with a native tool call although none was offered.
+                // Its generation is kept as the answer; the caller reads the intended action from it.
+                return new AdapterResult(failed, request.model(), 0, 0, false, "tool_use_failed", 0, 0);
+            }
+            String retryAfter = e.getResponseHeaders() == null ? null : e.getResponseHeaders().getFirst("Retry-After");
             throw new ModelCallException("Provider error " + e.getStatusCode().value() + ": "
-                    + abbreviate(e.getResponseBodyAsString()), e.getStatusCode().value(), e);
+                    + abbreviate(e.getResponseBodyAsString()), e.getStatusCode().value(), e, seconds(retryAfter));
         } catch (RestClientException e) {
             throw new ModelCallException("Could not reach the provider: " + e.getMessage(), 0, e);
         }
@@ -109,6 +116,26 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
             if (!id.isBlank()) ids.add(id.startsWith("models/") ? id.substring("models/".length()) : id);
         }
         return ids.stream().distinct().sorted().toList();
+    }
+
+    private static String failedToolGeneration(RestClientResponseException e) {
+        if (e.getStatusCode().value() != 400) return null;
+        try {
+            JsonNode error = JSON.readTree(e.getResponseBodyAsString()).path("error");
+            String generation = error.path("failed_generation").asString("");
+            return "tool_use_failed".equals(error.path("code").asString("")) && !generation.isBlank() ? generation : null;
+        } catch (RuntimeException parse) {
+            return null;
+        }
+    }
+
+    private static long seconds(String retryAfter) {
+        if (retryAfter == null) return -1;
+        try {
+            return (long) Math.ceil(Double.parseDouble(retryAfter.strip()));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private static String abbreviate(String s) {

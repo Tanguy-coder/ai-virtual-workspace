@@ -275,6 +275,75 @@ class RealignmentIntegrationTest {
                 && r.body().contains("No task T-99"))).isTrue();
     }
 
+    /**
+     * Small providers (Groq, OpenRouter): rate-limit answers are waited out, a request larger than the per-minute
+     * output limit is shrunk and the cap remembered, and a native tool call ("tool_use_failed") is read as the action.
+     * The error bodies are the ones Groq actually returned on the CTO's project.
+     */
+    @Test
+    void smallProvidersRateLimitsAndNativeToolCallsAreHandled() {
+        TestApi api = new TestApi(port);
+        api.register("cto-groq");
+        String ws = api.post("/api/v1/workspaces", Map.of("name", "Groq")).json().get("id").asString();
+        String pid = api.post("/api/v1/workspaces/" + ws + "/providers", Map.of("preset", "ollama", "name", "Small",
+                "baseUrl", stub.baseUrl() + "/v1")).json().get("id").asString();
+        api.put("/api/v1/workspaces/" + ws + "/providers/" + pid + "/models", Map.of("defaultModel", "stub-large"));
+        String p = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "Groq")).json().get("id").asString();
+        String lead = null;
+        for (JsonNode a : api.get("/api/v1/projects/" + p + "/agents").json()) if (a.get("lead").asBoolean()) lead = a.get("id").asString();
+        String leadId = lead;
+
+        stub.openAiResponder = body -> "Hello from stub";
+        stub.openAiErrors.add(new Object[] {429, """
+                {"error":{"message":"Request too large for model `stub-large` in organization `org_1` service tier `on_demand` on output tokens per minute (OTPM): Limit 1000, Requested 4000. The request's expected output tokens exceed the enforced limit; reduce max_tokens (or the request's expected output) and try again.","type":"tokens","code":"rate_limit_exceeded"}}"""});
+        stub.openAiErrors.add(new Object[] {429, """
+                {"error":{"message":"Rate limit reached for model `stub-large` in organization `org_1` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4477, Requested 4577. Please try again in 0.2s.","type":"tokens","code":"rate_limit_exceeded"}}"""});
+        int before = stub.requests.size();
+        api.post("/api/v1/agents/" + leadId + "/messages", Map.of("content", "Hello"));
+        JsonNode reply = await(() -> api.get("/api/v1/agents/" + leadId + "/messages").json(),
+                m -> m.size() == 2 && !m.get(1).get("status").asString().equals("PENDING")).get(1);
+        assertThat(reply.get("status").asString()).isEqualTo("FINAL");
+        assertThat(reply.get("content").asString()).isEqualTo("Hello from stub");
+        List<StubModelServer.Captured> calls = stub.requests.subList(before, stub.requests.size());
+        assertThat(calls).hasSize(3);
+        assertThat(calls.get(0).body()).contains("\"max_tokens\":4000");
+        assertThat(calls.get(1).body()).contains("\"max_tokens\":1000");
+        assertThat(calls.get(2).body()).contains("\"max_tokens\":1000");
+
+        // The learned cap applies to the next call at once: no new "too large" round trip.
+        before = stub.requests.size();
+        api.post("/api/v1/agents/" + leadId + "/messages", Map.of("content", "Again"));
+        await(() -> api.get("/api/v1/agents/" + leadId + "/messages").json(), m -> m.size() == 4);
+        assertThat(stub.requests.subList(before, stub.requests.size())).hasSize(1);
+        assertThat(stub.requests.getLast().body()).contains("\"max_tokens\":1000");
+
+        // OpenRouter-style limits: the model's own max_tokens ceiling, then credits for fewer tokens.
+        stub.openAiErrors.add(new Object[] {400, """
+                {"error":{"message":"`max_tokens` must be less than or equal to `800`, the maximum value for `max_tokens` is less than the `context_window` for this model","type":"invalid_request_error","param":"max_tokens"}}"""});
+        stub.openAiErrors.add(new Object[] {402, """
+                {"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 800 tokens, but can only afford 700. To increase, visit https://openrouter.ai/settings/credits","code":402}}"""});
+        before = stub.requests.size();
+        api.post("/api/v1/agents/" + leadId + "/messages", Map.of("content", "Third"));
+        JsonNode third = await(() -> api.get("/api/v1/agents/" + leadId + "/messages").json(),
+                m -> m.size() == 6 && !m.get(5).get("status").asString().equals("PENDING")).get(5);
+        assertThat(third.get("status").asString()).isEqualTo("FINAL");
+        calls = stub.requests.subList(before, stub.requests.size());
+        assertThat(calls).hasSize(3);
+        assertThat(calls.get(1).body()).contains("\"max_tokens\":800");
+        assertThat(calls.get(2).body()).contains("\"max_tokens\":630");
+
+        // A model that answers with a native tool call: its call is read as the action.
+        JsonNode dev = api.post("/api/v1/projects/" + p + "/agents", Map.of("roleTemplateId", "rt_java")).json();
+        stub.openAiResponder = body -> body.contains("<tools>") ? "unused" : "OK";
+        stub.openAiErrors.add(new Object[] {400, """
+                {"error":{"message":"Tool choice is none, but model called a tool","type":"invalid_request_error","code":"tool_use_failed","failed_generation":"{\\"name\\": \\"task.block\\", \\"arguments\\": {\\"reason\\": \\"Need the API contract\\"}\\n}"}}"""});
+        String task = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Native call",
+                "acceptanceCriteria", List.of("it works"), "assigneeId", dev.get("id").asString())).json().get("id").asString();
+        JsonNode run = await(() -> api.get("/api/v1/tasks/" + task + "/run").json().get("run"),
+                r -> !r.isNull() && r.get("status").asString().equals("BLOCKED"));
+        assertThat(run.get("blockedReason").asString()).contains("Need the API contract");
+    }
+
     private static JsonNode find(JsonNode tasks, String title) {
         for (JsonNode t : tasks) if (t.get("title").asString().equals(title)) return t;
         throw new AssertionError("No task " + title + " in " + tasks);
