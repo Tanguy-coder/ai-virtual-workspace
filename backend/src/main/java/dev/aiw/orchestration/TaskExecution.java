@@ -63,6 +63,17 @@ public class TaskExecution {
     private static final int MAX_REVIEW_ROUNDS = 3;
     private static final int FULL_OUTPUTS = 8;
 
+    /**
+     * How much of the run a step prompt carries. NORMAL keeps everything; the lean levels are used when the provider
+     * allows few tokens per minute (Groq free tier: 8 000), so that a long task still fits in one request.
+     */
+    record Lean(int historyEntries, int fullOutputs, int outputChars, int newsChars, int specChars, int memoryChars) {}
+    static final Lean NORMAL = new Lean(Integer.MAX_VALUE, FULL_OUTPUTS, Integer.MAX_VALUE, 4_000, 4_000, 3_000);
+    static final List<Lean> LEAN = List.of(new Lean(20, 3, 2_500, 2_000, 1_500, 1_000),
+            new Lean(10, 2, 1_200, 1_200, 600, 400), new Lean(6, 1, 600, 800, 0, 0));
+    /** Conservative characters per token when sizing a prompt against a token limit. */
+    private static final int CHARS_PER_TOKEN = 3;
+
     private final TaskService tasks;
     private final TaskRuns runs;
     private final AgentTools tools;
@@ -216,12 +227,30 @@ public class TaskExecution {
         String sandbox = ensureSandbox(run);
         AgentTools.Workspace ws = new AgentTools.Workspace(Path.of(run.worktree()), sandbox, author(agent));
 
-        AgentRunner.Context context = runner.context(agent, task.title() + " " + task.description(), 4_000, 3_000)
-                .withStable(AgentTools.MANUAL);
-        String prompt = prompt(run, task, agent);
+        String query = task.title() + " " + task.description();
+        long perMinute = gateway.tokensPerMinute(agent.providerId(), agent.model()).orElse(0L);
+        long maxOut = perMinute > 0 ? Math.min(8_000, Math.max(800, perMinute / 5)) : 8_000;
+        AgentRunner.Context ctx = null;
+        String text = null;
+        if (perMinute <= 0) {
+            ctx = runner.context(agent, query, NORMAL.specChars(), NORMAL.memoryChars()).withStable(AgentTools.MANUAL);
+            text = prompt(run, task, agent, NORMAL);
+        } else {
+            // The whole request must fit in the provider's per-minute allowance: take the first level that fits.
+            long budget = (perMinute - maxOut - 400) * CHARS_PER_TOKEN;
+            for (Lean lean : LEAN) {
+                ctx = runner.context(agent, query, lean.specChars(), lean.memoryChars()).withStable(AgentTools.MANUAL);
+                text = prompt(run, task, agent, lean);
+                long size = ctx.stable().length() + (ctx.dynamic() == null ? 0 : ctx.dynamic().length()) + text.length();
+                if (size <= budget) break;
+            }
+        }
+        AgentRunner.Context context = ctx;
+        String prompt = text;
+        long outTokens = maxOut;
         AgentRunner.Usage usage = new AgentRunner.Usage();
         long t0 = System.nanoTime();
-        JsonNode decision = runner.measure(usage, () -> runner.completeJson(job, agent, context, prompt, 8_000, "medium",
+        JsonNode decision = runner.measure(usage, () -> runner.completeJson(job, agent, context, prompt, outTokens, "medium",
                 "T-" + task.number() + " · step " + (run.steps() + 1), this::validateDecision));
         long ms = (System.nanoTime() - t0) / 1_000_000;
         tx.executeWithoutResult(s -> {
@@ -317,7 +346,7 @@ public class TaskExecution {
     }
 
     /** The prompt of a step: the task, the branch, the compacted history and what is new since the last decision. */
-    private String prompt(TaskRun run, Task task, Agent agent) {
+    private String prompt(TaskRun run, Task task, Agent agent, Lean lean) {
         StringBuilder sb = new StringBuilder();
         sb.append("<task number=\"T-").append(task.number()).append("\">\n").append(task.title()).append("\n");
         if (task.description() != null && !task.description().isBlank()) sb.append(task.description().strip()).append("\n");
@@ -348,6 +377,11 @@ public class TaskExecution {
 
         if (!answered.isEmpty()) {
             sb.append("<history>\n");
+            if (answered.size() > lean.historyEntries()) {
+                int dropped = answered.size() - lean.historyEntries();
+                answered = new ArrayList<>(answered.subList(dropped, answered.size()));
+                sb.append("(").append(dropped).append(" earlier entries left out; the repository state above sums them up)\n");
+            }
             long toolCount = answered.stream().filter(st -> st.kind().equals("TOOL")).count();
             long seen = 0;
             for (RunStep st : answered) {
@@ -356,9 +390,14 @@ public class TaskExecution {
                     case "TOOL" -> {
                         seen++;
                         sb.append("#").append(st.seq()).append(" ").append(st.summary()).append(" [").append(st.outcome()).append("]\n");
-                        if (seen > toolCount - FULL_OUTPUTS) {
+                        if (seen > toolCount - lean.fullOutputs()) {
                             Object out = st.detail().get("out");
-                            if (out != null && !out.toString().isBlank()) sb.append("<output>\n").append(out).append("\n</output>\n");
+                            if (out != null && !out.toString().isBlank()) {
+                                String o = out.toString();
+                                sb.append("<output>\n").append(o.length() > lean.outputChars()
+                                        ? o.substring(0, lean.outputChars()) + "\n(output cut; read a smaller range if you need more)" : o)
+                                        .append("\n</output>\n");
+                            }
                         }
                     }
                     default -> sb.append("#").append(st.seq()).append(" ").append(st.kind().toLowerCase()).append(": ")
@@ -372,7 +411,7 @@ public class TaskExecution {
             for (RunStep st : news) {
                 sb.append("- ").append(st.summary()).append("\n");
                 Object text = st.detail().get("text");
-                if (text != null) sb.append(AgentTools.clip(text.toString(), 4_000)).append("\n");
+                if (text != null) sb.append(AgentTools.clip(text.toString(), lean.newsChars())).append("\n");
             }
             sb.append("</new>\n");
         }

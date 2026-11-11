@@ -40,6 +40,8 @@ public class ModelGateway {
 
     /** Output cap learned per provider and model from "request too large" answers (output tokens per minute). */
     private final Map<String, Long> outputCaps = new ConcurrentHashMap<>();
+    /** Tokens per minute allowed per provider and model, learned from "request too large (TPM)" answers. */
+    private final Map<String, Long> perMinute = new ConcurrentHashMap<>();
 
     private final ProviderService providers;
     private final PricingService pricing;
@@ -90,12 +92,20 @@ public class ModelGateway {
         long start = System.nanoTime();
         AdapterResult called;
         ModelRequest sent = req;
+        long[] lastRequested = {-1};
         for (int attempt = 0; ; attempt++) {
             try {
                 called = adapter.call(provider.id(), provider.baseUrl(), apiKey, sent);
                 break;
             } catch (ModelCallException e) {
-                ModelRequest retry = attempt < RATE_LIMIT_RETRIES ? afterRateLimit(provider, sent, e, attempt) : null;
+                ModelRequest retry;
+                try {
+                    retry = attempt < RATE_LIMIT_RETRIES ? afterRateLimit(provider, sent, e, attempt, lastRequested) : null;
+                } catch (ModelCallException clear) {
+                    long latency = (System.nanoTime() - start) / 1_000_000;
+                    record(req, provider, req.model(), 0, 0, 0, 0, null, latency, "ERROR", clear.getMessage());
+                    throw clear;
+                }
                 if (retry == null) {
                     long latency = (System.nanoTime() - start) / 1_000_000;
                     record(req, provider, req.model(), 0, 0, 0, 0, null, latency, "ERROR", e.getMessage());
@@ -131,7 +141,7 @@ public class ModelGateway {
      * What to do after a rate-limit answer (429/413): the same request after the wait the provider asks, or a smaller
      * one when it is larger than the per-minute limit itself. Null: not a rate limit, or nothing can make it fit.
      */
-    ModelRequest afterRateLimit(Provider provider, ModelRequest request, ModelCallException e, int attempt) {
+    ModelRequest afterRateLimit(Provider provider, ModelRequest request, ModelCallException e, int attempt, long[] lastRequested) {
         String message = e.getMessage() == null ? "" : e.getMessage();
         String key = provider.id() + "|" + request.model();
         Matcher modelMax = MODEL_MAX.matcher(message);
@@ -163,6 +173,16 @@ public class ModelGateway {
         if (tooLarge && limit.find()) {
             long allowed = Long.parseLong(limit.group(1)), requested = Long.parseLong(limit.group(2));
             boolean outputLimit = message.contains("output tokens");
+            if (!outputLimit) {
+                perMinute.put(key, allowed);
+                // Still the same size after a smaller max_tokens: the prompt itself is above the per-minute limit.
+                if (requested == lastRequested[0]) {
+                    throw new ModelCallException("The prompt (about " + requested + " tokens) is larger than what "
+                            + provider.name() + " allows per minute for " + request.model() + " (" + allowed
+                            + "). The next attempt sends a shorter one; a model with higher limits avoids this.", e.statusCode(), e);
+                }
+                lastRequested[0] = requested;
+            }
             long max = outputLimit ? allowed : request.maxTokens() - (requested - allowed) - 64;
             if (max < MIN_OUTPUT_TOKENS || max >= request.maxTokens()) {
                 throw new ModelCallException("This request needs more tokens per minute than " + provider.name()
@@ -191,6 +211,11 @@ public class ModelGateway {
     /** Output ceiling learned for this provider and model, if any (small plans: Groq, OpenRouter free tiers). */
     public java.util.Optional<Long> outputCap(String providerId, String model) {
         return java.util.Optional.ofNullable(outputCaps.get(providerId + "|" + model));
+    }
+
+    /** Tokens per minute the provider allows for this model, when it said so: prompts must fit well under it. */
+    public java.util.Optional<Long> tokensPerMinute(String providerId, String model) {
+        return java.util.Optional.ofNullable(perMinute.get(providerId + "|" + model));
     }
 
     /** Overridable so tests do not wait. */

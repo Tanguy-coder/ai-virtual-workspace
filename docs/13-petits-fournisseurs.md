@@ -12,7 +12,11 @@ Demande du CTO du 2026-11-10 : un gros projet doit pouvoir avancer avec un petit
 | 402 `in_flight_budget_exhausted` | échec | attente puis nouvel essai, comme une limite de débit |
 | 400 `tool_use_failed` « Tool choice is none, but model called a tool » (Groq) | étape en échec | la génération du modèle (`failed_generation`) est gardée ; l'appel natif `{"name", "arguments"}` est lu comme l'action correspondante |
 
-Quand un plafond de sortie est connu et bas (< 4 000), le prompt de l'agent le lui indique : réponses courtes, fichiers créés en plusieurs fois (squelette puis `file.edit`). Les plafonds appris sont en mémoire : après un redémarrage, un seul aller-retour suffit à les réapprendre.
+| 413 « Request too large … (TPM): Limit 8000, Requested 9388 », et toujours 9388 après réduction de `max_tokens` | 4 essais inutiles puis échec brut | c'est le prompt lui-même qui dépasse : l'essai s'arrête avec une raison claire, la limite par minute est retenue, et l'essai suivant du worker construit un prompt allégé |
+
+**Prompt allégé.** Quand la limite par minute d'un modèle est connue, une étape de développement doit tenir dedans en une requête : sortie à 1/5 de la limite (8 000 → 1 600 tokens), et prompt construit au premier des trois niveaux qui tient (environ 3 caractères par token) : moins de spécification et de mémoire, historique réduit aux 20, 10 puis 6 dernières entrées (les plus anciennes sont résumées par l'état du dépôt), sorties d'outils tronquées. Sans limite connue, rien ne change.
+
+Quand un plafond de sortie est connu et bas (< 4 000), le prompt de l'agent le lui indique : réponses courtes, fichiers créés en plusieurs fois (squelette puis `file.edit`). Les plafonds et limites appris sont en mémoire : après un redémarrage, un aller-retour (ou un essai de job) suffit à les réapprendre.
 
 Les erreurs qui ne relèvent pas d'une limite (clé invalide, modèle inconnu, réseau) ne sont pas réessayées par la passerelle ; le worker garde ses propres reprises.
 
@@ -22,4 +26,4 @@ Un modèle à petite fenêtre de contexte (par exemple `allam-2-7b`, 4 096 token
 
 ## Vérification
 
-`RealignmentIntegrationTest.smallProvidersRateLimitsAndNativeToolCallsAreHandled` rejoue ces réponses avec les corps réels : le message au Lead aboutit après un 429 « too large » puis un 429 d'attente (`max_tokens` 4000 → 1000), le message suivant part directement à 1000, le plafond du modèle puis la limite de crédits ramènent la requête à 800 puis 630, et un appel d'outil natif bloque bien la tâche avec la raison donnée par le modèle. Suite backend complète : 25 tests au vert.
+`RealignmentIntegrationTest.smallProvidersRateLimitsAndNativeToolCallsAreHandled` rejoue ces réponses avec les corps réels : le message au Lead aboutit après un 429 « too large » puis un 429 d'attente (`max_tokens` 4000 → 1000), le message suivant part directement à 1000, le plafond du modèle puis la limite de crédits ramènent la requête à 800 puis 630, et un appel d'outil natif bloque bien la tâche avec la raison donnée par le modèle. `ModelGatewayRateLimitTest` lit les réponses réelles sans réseau, dont le 413 au « Requested » inchangé. Suite backend complète : 27 tests au vert.

@@ -342,6 +342,24 @@ class RealignmentIntegrationTest {
         JsonNode run = await(() -> api.get("/api/v1/tasks/" + task + "/run").json().get("run"),
                 r -> !r.isNull() && r.get("status").asString().equals("BLOCKED"));
         assertThat(run.get("blockedReason").asString()).contains("Need the API contract");
+
+        // A prompt larger than the provider's tokens per minute (Groq 413, same "Requested" after a smaller max_tokens):
+        // the attempt fails with a clear reason, and the retried step is built lean, with a small output.
+        String tpm = """
+                {"error":{"message":"Request too large for model `stub-large` in organization `org_1` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 9388, please reduce your message size and try again.","type":"tokens","code":"rate_limit_exceeded"}}""";
+        stub.openAiErrors.add(new Object[] {413, tpm});
+        stub.openAiErrors.add(new Object[] {413, tpm});
+        stub.openAiResponder = body -> body.contains("<tools>")
+                ? "{\"thought\": \"Lean.\", \"actions\": [{\"tool\": \"task.block\", \"args\": {\"reason\": \"Lean prompt worked\"}}]}" : "OK";
+        int mark = stub.requests.size();
+        String second = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Long task",
+                "acceptanceCriteria", List.of("it works"), "assigneeId", dev.get("id").asString())).json().get("id").asString();
+        JsonNode leanRun = await(() -> api.get("/api/v1/tasks/" + second + "/run").json().get("run"),
+                r -> !r.isNull() && r.get("status").asString().equals("BLOCKED"));
+        assertThat(leanRun.get("blockedReason").asString()).contains("Lean prompt worked");
+        // Both 413s failed their attempt (the 800-token cap learned above leaves no room to shrink); the third attempt
+        // went through. The "same Requested" path is covered in ModelGatewayRateLimitTest.
+        assertThat(stub.requests.subList(mark, stub.requests.size())).hasSize(3);
     }
 
     private static JsonNode find(JsonNode tasks, String title) {
