@@ -362,6 +362,44 @@ class RealignmentIntegrationTest {
         assertThat(stub.requests.subList(mark, stub.requests.size())).hasSize(3);
     }
 
+    /**
+     * Small models slip on JSON: a reply with raw newlines in a string is read leniently; a malformed reply (the exact
+     * Jackson error seen on the CTO's project) no longer blocks the task: the agent sees why and tries again.
+     */
+    @Test
+    void aMalformedReplyIsRetriedInsteadOfBlockingTheTask() {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        stub.anthropicInputTokens = 12;
+        stub.anthropicResponder = body -> {
+            if (!body.contains("<tools>")) return "OK";
+            int n = calls.incrementAndGet();
+            if (n <= 2) return "{\"thought\": \"Write it.\", \"actions\": [{\"tool\" {\"file.write\"}]}"; // reply + correction
+            if (n == 3) return "{\"thought\": \"Raw newline\nin a string.\", \"actions\": [{\"tool\": \"file.write\", "
+                    + "\"args\": {\"path\": \"a.txt\", \"content\": \"line 1\nline 2\"}},]}";
+            return body.contains("Reply not usable") || body.contains("Raw newline")
+                    ? "{\"thought\": \"Done.\", \"actions\": [{\"tool\": \"task.block\", \"args\": {\"reason\": \"Recovered after a bad reply\"}}]}"
+                    : WAIT;
+        };
+        TestApi api = new TestApi(port);
+        api.register("cto-json");
+        String ws = api.post("/api/v1/workspaces", Map.of("name", "Json")).json().get("id").asString();
+        api.post("/api/v1/workspaces/" + ws + "/providers", Map.of(
+                "kind", "ANTHROPIC", "name", "Anthropic", "baseUrl", stub.baseUrl(), "apiKey", "sk-ant-test"));
+        String p = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "Json")).json().get("id").asString();
+        JsonNode dev = api.post("/api/v1/projects/" + p + "/agents", Map.of("roleTemplateId", "rt_java")).json();
+        String task = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Json task",
+                "acceptanceCriteria", List.of("it works"), "assigneeId", dev.get("id").asString())).json().get("id").asString();
+
+        JsonNode view = await(() -> api.get("/api/v1/tasks/" + task + "/run").json(),
+                v -> !v.get("run").isNull() && v.get("run").get("status").asString().equals("BLOCKED"));
+        assertThat(view.get("run").get("blockedReason").asString()).isEqualTo("Recovered after a bad reply");
+        String steps = view.get("steps").toString();
+        assertThat(steps).contains("Reply not usable: The model did not produce a usable answer: The JSON is malformed")
+                .doesNotContain("REDACTED");
+        // The lenient reading accepted raw newlines and a trailing comma: the file was written.
+        assertThat(steps).contains("file.write a.txt");
+    }
+
     private static JsonNode find(JsonNode tasks, String title) {
         for (JsonNode t : tasks) if (t.get("title").asString().equals(title)) return t;
         throw new AssertionError("No task " + title + " in " + tasks);

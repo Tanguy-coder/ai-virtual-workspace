@@ -20,10 +20,16 @@ Quand un plafond de sortie est connu et bas (< 4 000), le prompt de l'agent le l
 
 Les erreurs qui ne relèvent pas d'une limite (clé invalide, modèle inconnu, réseau) ne sont pas réessayées par la passerelle ; le worker garde ses propres reprises.
 
+## Sandboxes et réponses mal formées
+
+- **Réseau des installations.** Une sandbox démarre sur le réseau `none`, que Docker refuse de combiner avec un autre : le `docker network connect bridge` échouait sans bruit, et `npm install` tournait hors ligne (`EAI_AGAIN`). La sandbox quitte maintenant `none` pour la durée de l'installation, puis y revient. `SandboxNetworkTest` le vérifie (en ligne pendant `npm install`, hors ligne après) et échoue sur l'ancien code.
+- **Montage du dépôt quand la plateforme tourne dans Docker.** Voir le commit `1ab3204` : les sandboxes montent le sous-dossier du volume `aiw_aiwdata`.
+- **JSON des petits modèles.** La lecture accepte les retours à la ligne bruts dans les chaînes, les virgules finales, les guillemets simples et les commentaires. Une réponse encore inutilisable après sa correction ne bloque plus la tâche : l'agent reçoit l'erreur et le début de sa réponse à l'étape suivante, avec la consigne de rester court. La tâche n'est bloquée qu'après 3 réponses inutilisables d'affilée. Le message d'erreur n'affiche plus le bruit « at [Source: REDACTED… ».
+
 ## Limite connue
 
 Un modèle à petite fenêtre de contexte (par exemple `allam-2-7b`, 4 096 tokens) ne peut pas tenir le prompt d'une étape de développement (outils, règles, tâche, état du dépôt). Pour les agents qui écrivent du code, choisir un modèle d'au moins 32k de contexte.
 
 ## Vérification
 
-`RealignmentIntegrationTest.smallProvidersRateLimitsAndNativeToolCallsAreHandled` rejoue ces réponses avec les corps réels : le message au Lead aboutit après un 429 « too large » puis un 429 d'attente (`max_tokens` 4000 → 1000), le message suivant part directement à 1000, le plafond du modèle puis la limite de crédits ramènent la requête à 800 puis 630, et un appel d'outil natif bloque bien la tâche avec la raison donnée par le modèle. `ModelGatewayRateLimitTest` lit les réponses réelles sans réseau, dont le 413 au « Requested » inchangé. Suite backend complète : 27 tests au vert.
+`RealignmentIntegrationTest.smallProvidersRateLimitsAndNativeToolCallsAreHandled` rejoue ces réponses avec les corps réels : le message au Lead aboutit après un 429 « too large » puis un 429 d'attente (`max_tokens` 4000 → 1000), le message suivant part directement à 1000, le plafond du modèle puis la limite de crédits ramènent la requête à 800 puis 630, et un appel d'outil natif bloque bien la tâche avec la raison donnée par le modèle. `ModelGatewayRateLimitTest` lit les réponses réelles sans réseau, dont le 413 au « Requested » inchangé. Suite backend complète : 29 tests au vert.

@@ -250,8 +250,27 @@ public class TaskExecution {
         long outTokens = maxOut;
         AgentRunner.Usage usage = new AgentRunner.Usage();
         long t0 = System.nanoTime();
-        JsonNode decision = runner.measure(usage, () -> runner.completeJson(job, agent, context, prompt, outTokens, "medium",
-                "T-" + task.number() + " · step " + (run.steps() + 1), this::validateDecision));
+        JsonNode decision;
+        try {
+            decision = runner.measure(usage, () -> runner.completeJson(job, agent, context, prompt, outTokens, "medium",
+                    "T-" + task.number() + " · step " + (run.steps() + 1), this::validateDecision));
+        } catch (AgentRunner.UnusableAnswer e) {
+            // A malformed reply is the model's slip, not a blocker: it sees why at its next step. Blocked after 3 in a row.
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            if (unusableInARow(run) >= UNUSABLE_LIMIT - 1) {
+                tx.executeWithoutResult(s -> runs.usage(run.id(), usage.input, usage.output, usage.cacheRead, usage.cost));
+                throw e;
+            }
+            tx.executeWithoutResult(s -> {
+                runs.usage(run.id(), usage.input, usage.output, usage.cacheRead, usage.cost);
+                runs.step(run, "PLATFORM", null, UNUSABLE + e.getMessage(), Map.of("text", "Your reply could not be used: "
+                        + e.getMessage() + "\nIt began with:\n" + e.excerpt() + "\nReply with one valid JSON object only; "
+                        + "keep file contents short (several file.edit calls rather than one large file.write)."),
+                        "ERROR", usage.input, usage.output, ms);
+            });
+            next(run);
+            return;
+        }
         long ms = (System.nanoTime() - t0) / 1_000_000;
         tx.executeWithoutResult(s -> {
             runs.usage(run.id(), usage.input, usage.output, usage.cacheRead, usage.cost);
@@ -302,6 +321,21 @@ public class TaskExecution {
             return;
         }
         next(run);
+    }
+
+    private static final String UNUSABLE = "Reply not usable: ";
+    private static final int UNUSABLE_LIMIT = 3;
+
+    /** Unusable replies since the agent's last usable decision. */
+    private int unusableInARow(TaskRun run) {
+        int count = 0;
+        List<RunStep> steps = runs.steps(run.id());
+        for (int i = steps.size() - 1; i >= 0; i--) {
+            RunStep st = steps.get(i);
+            if ("MODEL".equals(st.kind()) || "Resumed".equals(st.summary())) break;
+            if ("PLATFORM".equals(st.kind()) && st.summary().startsWith(UNUSABLE)) count++;
+        }
+        return count;
     }
 
     private void validateDecision(JsonNode node) {

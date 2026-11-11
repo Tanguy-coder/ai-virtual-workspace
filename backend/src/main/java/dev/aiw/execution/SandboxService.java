@@ -113,13 +113,26 @@ public class SandboxService {
     /** Runs one command in the container. Commands that install packages get network access for their duration. */
     public Command exec(String containerId, String command, Duration timeout) {
         boolean network = NEEDS_NETWORK.stream().anyMatch(p -> (command.strip() + " ").startsWith(p));
-        if (network) docker("network", "connect", "bridge", containerId);
+        if (network) {
+            // A container on the "none" network cannot join another one: leave it first, rejoin it afterwards.
+            docker("network", "disconnect", "none", containerId);
+            Processes.Result joined = docker("network", "connect", "bridge", containerId);
+            if (!joined.ok()) {
+                docker("network", "connect", "none", containerId);
+                return new Command(command, 1, "The platform could not give this command network access: "
+                        + joined.combined().strip(), false, 0);
+            }
+        }
         try {
             Processes.Result r = Processes.run(List.of("docker", "exec", containerId, "sh", "-c", command), null,
                     timeout == null ? commandTimeout : timeout);
             return new Command(command, r.exit(), r.combined(), r.timedOut(), r.durationMs());
         } finally {
-            if (network) docker("network", "disconnect", "-f", "bridge", containerId);
+            if (network) {
+                docker("network", "disconnect", "-f", "bridge", containerId);
+                Processes.Result isolated = docker("network", "connect", "none", containerId);
+                if (!isolated.ok()) log.warn("Sandbox {} could not rejoin the none network: {}", containerId, isolated.combined().strip());
+            }
         }
     }
 

@@ -28,6 +28,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.core.json.JsonReadFeature;
 
 /**
  * Runs one model step for an agent: builds its context (instructions, project, specification, shared memory),
@@ -41,6 +42,28 @@ public class AgentRunner {
             super(message);
         }
     }
+
+    /** The model's reply could not be used even after its correction; {@code excerpt}: the start of its last reply. */
+    public static class UnusableAnswer extends JobFailure {
+        private final String excerpt;
+
+        public UnusableAnswer(String message, String excerpt) {
+            super(message);
+            this.excerpt = excerpt;
+        }
+
+        public String excerpt() { return excerpt; }
+    }
+
+    /**
+     * Lenient reading of model JSON: small models often put raw newlines in strings (file contents), trailing commas,
+     * single quotes or comments. None of these change the meaning, so they are accepted.
+     */
+    private static final JsonMapper LENIENT = JsonMapper.builder()
+            .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS, JsonReadFeature.ALLOW_TRAILING_COMMA,
+                    JsonReadFeature.ALLOW_SINGLE_QUOTES, JsonReadFeature.ALLOW_JAVA_COMMENTS,
+                    JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER)
+            .build();
 
     /** Whole specification, for the one step that must read all of it (the Lead's analysis). */
     public static final int FULL_SPEC = 120_000;
@@ -175,6 +198,7 @@ public class AgentRunner {
         List<ChatTurn> turns = new ArrayList<>(List.of(new ChatTurn(ChatTurn.Role.USER, prompt
                 + "\n\nReply with a single JSON object and nothing else: no prose, no Markdown code fence.")));
         String error = null;
+        String last = "";
         for (int attempt = 0; attempt < 2; attempt++) {
             ModelResult result = call(job, agent, context, turns, maxTokens, effort, tier,
                     attempt == 0 ? summary : summary + " (correction)");
@@ -188,12 +212,14 @@ public class AgentRunner {
             } catch (InvalidOutput e) {
                 gateway.forget(result);
                 error = e.getMessage();
+                last = result.text();
                 turns.add(new ChatTurn(ChatTurn.Role.ASSISTANT, result.text().isBlank() ? "(empty)" : result.text()));
                 turns.add(new ChatTurn(ChatTurn.Role.USER, "Your reply could not be used: " + e.getMessage()
                         + "\nReply again with only the corrected JSON object."));
             }
         }
-        throw new JobFailure("The model did not produce a usable answer: " + error);
+        throw new UnusableAnswer("The model did not produce a usable answer: " + error,
+                last.length() > 1_500 ? last.substring(0, 1_500) + "…" : last);
     }
 
     private ModelResult call(AgentJob job, Agent agent, Context context, List<ChatTurn> turns, long maxTokens,
@@ -265,12 +291,14 @@ public class AgentRunner {
         int close = t.lastIndexOf('}');
         if (open < 0 || close < open) throw new InvalidOutput("No JSON object was found in the reply.");
         try {
-            JsonNode node = json.readTree(t.substring(open, close + 1));
+            JsonNode node = LENIENT.readTree(t.substring(open, close + 1));
             if (!node.isObject()) throw new InvalidOutput("The reply is not a JSON object.");
             return node;
         } catch (RuntimeException e) {
             if (e instanceof InvalidOutput io) throw io;
-            throw new InvalidOutput("The JSON is malformed: " + e.getMessage());
+            // Jackson appends "at [Source: REDACTED ...]": useless to the model and to the CTO.
+            String why = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage().split("\n at \\[Source")[0].strip();
+            throw new InvalidOutput("The JSON is malformed: " + why);
         }
     }
 
