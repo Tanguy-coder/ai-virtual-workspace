@@ -41,10 +41,14 @@ class OrchestrationController {
     private final CollaborationService collaboration;
 
     private TaskExecution execution;
+    private TaskSplitter splitter;
+    private RealignmentService realignment;
 
     @org.springframework.beans.factory.annotation.Autowired
-    void setExecution(TaskExecution execution) {
+    void setExecution(TaskExecution execution, TaskSplitter splitter, RealignmentService realignment) {
         this.execution = execution;
+        this.splitter = splitter;
+        this.realignment = realignment;
     }
 
     OrchestrationController(WorkspaceAccess access, LeadService lead, TaskService tasks, MeetingService meetings,
@@ -219,6 +223,47 @@ class OrchestrationController {
         Task cancelled = tasks.cancel(taskId, Actor.human(user(t.projectId())));
         execution.onCancelled(taskId);
         return cancelled;
+    }
+
+    record Split(@Size(max = 5_000) String guidance) {}
+
+    /** The CTO asks the Lead to split a task too big for its budget into smaller ones. */
+    @PostMapping("/api/v1/tasks/{taskId}/split")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    Map<String, String> split(@PathVariable String taskId, @Valid @RequestBody(required = false) Split body) {
+        Task t = loadTask(taskId, WorkspaceRole.MEMBER);
+        splitter.request(taskId, user(t.projectId()), body == null ? null : body.guidance());
+        return Map.of("status", "requested");
+    }
+
+    // ---- realignment ----
+
+    /**
+     * A realignment meeting mid-project. {@code delegate}: the Lead organizes it (agenda, participants) from the
+     * concern; otherwise the CTO gives title, agenda, organizer and participants.
+     */
+    record Realign(@NotBlank @Size(max = 5_000) String concern, boolean delegate, @Size(max = 200) String title,
+                   @Size(max = 10_000) String agenda, String organizerId, @Size(max = 12) List<String> participantIds,
+                   @Min(1) @Max(3) Integer rounds) {}
+
+    @PostMapping("/api/v1/projects/{projectId}/realignment")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    Map<String, Object> realign(@PathVariable String projectId, @Valid @RequestBody Realign body) {
+        String ws = access.requireProject(projectId, WorkspaceRole.MEMBER);
+        String userId = access.require(ws, WorkspaceRole.MEMBER);
+        if (body.delegate()) {
+            realignment.delegate(ws, projectId, userId, body.concern().strip());
+            return Map.of("status", "delegated");
+        }
+        if (body.title() == null || body.title().isBlank() || body.organizerId() == null || body.participantIds() == null
+                || body.participantIds().isEmpty()) {
+            throw ApiException.badRequest("meeting_incomplete", "Give a title, an organizer and participants, or delegate to the Lead");
+        }
+        String agenda = "CTO's concern: " + body.concern().strip()
+                + (body.agenda() == null || body.agenda().isBlank() ? "" : "\n\n" + body.agenda().strip());
+        Meeting m = realignment.convene(ws, projectId, body.title().strip(), agenda, body.organizerId(), body.participantIds(),
+                body.rounds() == null ? 2 : body.rounds(), Actor.human(userId));
+        return Map.of("status", "convened", "meeting", m);
     }
 
     /** Turns a meeting action item into a task, assigned to its owner. */

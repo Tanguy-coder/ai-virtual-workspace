@@ -10,6 +10,7 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
     LEAD_ANALYZE: "specification analysis", LEAD_ARCHITECT: "architecture and team proposal",
     LEAD_PLAN: "project plan", MEETING_TURN: "meeting turn", MEETING_SYNTHESIS: "meeting minutes",
     TASK_STEP: "work step", TASK_REVIEW: "code review", MR_MERGE: "merge",
+    LEAD_SPLIT: "task split", LEAD_REALIGN: "realignment meeting agenda",
   };
   switch (e.type) {
     case "task_run.started": return `${who(p.agentId)} started T-${p.number} on ${p.branch}`;
@@ -41,6 +42,13 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
     case "meeting.resumed": return `Meeting resumed: ${p.title}`;
     case "memory.recorded": return `${actor} recorded ${p.shared ? "in shared memory" : "a personal note"}: ${p.title}${Number(p.version) > 1 ? ` (v${p.version})` : ""}`;
     case "plan.created": return `The Lead planned the project · ${p.tasks} task(s)`;
+    case "task.split_requested": return `${actor} asked the Lead to split T-${p.number}`;
+    case "task.split": return `T-${p.number} split into ${Array.isArray(e.payload.into) ? (e.payload.into as number[]).map((n) => `T-${n}`).join(", ") : "smaller tasks"}`;
+    case "task.split_failed": return `Splitting T-${p.number} failed — ${p.error}`;
+    case "task_run.budget_changed": return `${actor} changed a task's token budget: ${p.from} → ${p.to}`;
+    case "realignment.requested": return `${actor} asked the Lead to organize a realignment meeting`;
+    case "realignment.failed": return `The Lead could not organize the realignment meeting — ${p.error}`;
+    case "realignment.applied": return `Realignment ${String(p.outcome).toLowerCase()}: ${p.solutionsDelivered} solution(s) delivered, ${p.resumed} run(s) resumed`;
     case "task.created": return `T-${p.number} created: ${p.title}`;
     case "task.assigned": return `T-${p.number} assigned to ${who(p.assigneeId)}`;
     case "task.unassigned": return `T-${p.number} unassigned`;

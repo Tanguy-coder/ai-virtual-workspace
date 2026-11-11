@@ -14,6 +14,7 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aiw -d aiw"]
       interval: 5s
+      timeout: 5s
       retries: 10
 
   redis:
@@ -26,8 +27,52 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
+      timeout: 5s
       retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      AIW_DB_URL: jdbc:postgresql://postgres:5432/aiw
+      AIW_DB_USER: aiw
+      AIW_DB_PASSWORD: ${AIW_DB_PASSWORD:?set AIW_DB_PASSWORD in .env}
+      AIW_REDIS_HOST: redis
+      AIW_REDIS_PORT: 6379
+      AIW_PORT: 8090
+      AIW_MASTER_KEY: ${AIW_MASTER_KEY:?set AIW_MASTER_KEY in .env}
+      AIW_ALLOWED_ORIGINS: ${AIW_ALLOWED_ORIGINS:-http://localhost:5180,http://127.0.0.1:5180}
+      AIW_DATA_DIR: /root/.aiw
+      AIW_SANDBOX_ENABLED: ${AIW_SANDBOX_ENABLED:-true}
+    ports:
+      - "8090:8090"
+    volumes:
+      - aiwdata:/root/.aiw
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8090/actuator/health || wget -qO- http://localhost:8090/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5180:5180"
+    depends_on:
+      backend:
+        condition: service_started
 
 volumes:
   pgdata:
   redisdata:
+  aiwdata:

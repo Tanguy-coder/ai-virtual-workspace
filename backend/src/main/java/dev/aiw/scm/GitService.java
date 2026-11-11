@@ -90,6 +90,10 @@ public class GitService {
         return dir;
     }
 
+    public boolean hasBranch(Path repo, String branch) {
+        return run(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch).ok();
+    }
+
     public void removeWorktree(Path repo, Path worktree) {
         run(repo, "worktree", "remove", "--force", worktree.toString());
     }

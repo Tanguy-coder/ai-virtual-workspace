@@ -114,7 +114,7 @@ class FoundationIntegrationTest {
         assertThat(call.path()).isEqualTo("/v1/chat/completions");
         assertThat(header(call, "authorization")).isEqualTo("Bearer " + apiKey);
         assertThat(call.body()).contains("ZEBRA-42").contains("What are the main domains?")
-                .contains("In a direct conversation you can only converse");
+                .contains("you carry out the CTO's orders").contains("<project_state recorded_by");
 
         // Real usage and cost: 1000 in x $2/M + 500 out x $10/M = $0.007
         JsonNode dashboard = api.get("/api/v1/projects/" + s.projectId() + "/dashboard").json();

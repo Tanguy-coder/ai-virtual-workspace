@@ -20,6 +20,7 @@ import java.util.Optional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -78,6 +79,15 @@ class ExecutionController {
     TaskRun resume(@PathVariable String taskId) {
         Task t = task(taskId, WorkspaceRole.MEMBER);
         return execution.resume(taskId, Actor.human(member(t.projectId())));
+    }
+
+    record Budget(@jakarta.validation.constraints.Min(10_000) @jakarta.validation.constraints.Max(50_000_000) long tokenBudget) {}
+
+    /** The CTO changes the token budget of the task's open run; a run stopped by its budget resumes. */
+    @PutMapping("/api/v1/tasks/{taskId}/run/budget")
+    TaskRun budget(@PathVariable String taskId, @Valid @RequestBody Budget body) {
+        Task t = task(taskId, WorkspaceRole.MEMBER);
+        return execution.setBudget(taskId, member(t.projectId()), body.tokenBudget());
     }
 
     record Content(@NotBlank @Size(max = 10_000) String content) {}

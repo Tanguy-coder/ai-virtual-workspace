@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Pause, Play, RotateCcw, Send, UserMinus, X } from "lucide-react";
+import { AlertTriangle, Check, Pause, Play, RotateCcw, Send, UserMinus, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api/client";
 import type { Agent, AgentMessage, AgentStep, Department, Provider } from "../api/types";
 import { useOpenJobs, useTasks } from "../lib/queries";
 import { STATUS_TONE, statusLabel } from "../lib/tasks";
+import { useDismiss } from "../lib/dismiss";
 import { useSelection } from "../lib/selection";
 import { relative, time, tokens, usd } from "../lib/format";
 import { useProviderModels } from "../lib/providers";
@@ -21,16 +22,13 @@ export function AgentDrawer({ workspaceId }: { workspaceId: string }) {
   });
   const [tab, setTab] = useState<"work" | "chat" | "profile" | "settings">("work");
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [close]);
+  const panel = useRef<HTMLElement>(null);
+  useDismiss(panel, close, !!agentId);
 
   if (!agentId) return null;
   const a = agent.data;
   return (
-    <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[520px] flex-col slide-in border-l border-line-strong bg-panel shadow-panel" aria-label="Agent">
+    <aside ref={panel} data-drawer className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[520px] flex-col slide-in border-l border-line-strong bg-panel shadow-panel" aria-label="Agent">
       {a && (
         <>
           <header className="flex items-start gap-3 border-b border-line p-5">
@@ -97,13 +95,23 @@ function Chat({ agent }: { agent: Agent }) {
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
         {messages.data?.length === 0 && (
           <p className="text-[13px] leading-relaxed text-muted">
-            Start the conversation. {agent.lead ? "Your Lead has the project's specifications in context." : ""}
+            Start the conversation. {agent.lead ? "Your Lead sees the project's specifications and its recorded state, and carries out your orders (assign, start, pause, budgets, splits, meetings)." : ""}
           </p>
         )}
         {messages.data?.map((m) => (
           <div key={m.id} className={`flex ${m.authorKind === "HUMAN" ? "justify-end" : "justify-start"}`}>
             <div className={`max-w-[88%] rounded-md px-4 py-2.5 text-[13px] ${m.authorKind === "HUMAN" ? "rounded-br-md bg-ink text-ink-fg" : "rounded-bl-md border border-line bg-panel-2"}`}>
-              <p className="whitespace-pre-wrap break-words leading-relaxed">{m.content}</p>
+              {m.content && <p className="whitespace-pre-wrap break-words leading-relaxed">{m.content}</p>}
+              {m.actions && m.actions.length > 0 && (
+                <ul className={`${m.content ? "mt-2 border-t border-line pt-2" : ""} space-y-1`} aria-label="Orders carried out by the platform">
+                  {m.actions.map((a, i) => (
+                    <li key={i} className="flex items-start gap-1.5 text-[12px] leading-snug">
+                      {a.ok ? <Check size={13} className="mt-0.5 shrink-0 text-ok" /> : <X size={13} className="mt-0.5 shrink-0 text-danger" />}
+                      <span><span className="font-mono text-[11px] text-faint">{a.action}</span> {a.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <p className={`mt-1 text-[11px] ${m.authorKind === "HUMAN" ? "text-ink-fg/70" : "text-faint"}`}>
                 {time(m.createdAt)}{m.status === "PENDING" && " · waiting for the agent"}
               </p>

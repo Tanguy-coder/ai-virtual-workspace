@@ -36,6 +36,7 @@ function keysFor(e: EventRecord): unknown[][] {
   }
   if (p && (e.type.startsWith("task.") || e.type === "plan.created")) keys.push(["tasks", p], ["task", e.subject.id], ["history", e.subject.id]);
   if (p && e.type.startsWith("meeting.")) keys.push(["meetings", p], ["meeting", e.subject.id]);
+  if (p && e.type.startsWith("realignment.")) keys.push(["meetings", p], ["meeting", e.subject.id], ["runs", p], ["run"], ["tasks", p]);
   if (p && e.type === "message.sent") {
     keys.push(["thread", e.payload.threadId], ["conversations", p]);
     if (e.payload.threadKind === "MEETING") keys.push(["meeting", e.payload.subjectId]);

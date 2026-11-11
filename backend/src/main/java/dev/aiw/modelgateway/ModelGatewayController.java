@@ -5,6 +5,8 @@ import dev.aiw.access.WorkspaceRole;
 import dev.aiw.shared.ApiException;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -28,10 +30,13 @@ class ModelGatewayController {
     private final PricingService pricing;
     private final BudgetService budgets;
     private final ModelGateway gateway;
+    private final long defaultTaskTokens;
 
     ModelGatewayController(WorkspaceAccess access, ProviderService providers, PricingService pricing,
-                           BudgetService budgets, ModelGateway gateway) {
+                           BudgetService budgets, ModelGateway gateway,
+                           @org.springframework.beans.factory.annotation.Value("${aiw.execution.token-budget:200000}") long defaultTaskTokens) {
         this.access = access;
+        this.defaultTaskTokens = defaultTaskTokens;
         this.providers = providers;
         this.pricing = pricing;
         this.budgets = budgets;
@@ -130,21 +135,24 @@ class ModelGatewayController {
                 body.outputUsdPerMtok());
     }
 
-    record BudgetView(BigDecimal dailyLimitUsd, BigDecimal totalLimitUsd, BudgetService.Spend spend) {}
+    /** {@code taskTokenBudget}: what the project sets (null: none); {@code defaultTaskTokenBudget}: the platform's. */
+    record BudgetView(BigDecimal dailyLimitUsd, BigDecimal totalLimitUsd, Long taskTokenBudget, long defaultTaskTokenBudget,
+                      BudgetService.Spend spend) {}
 
     @GetMapping("/api/v1/projects/{projectId}/budget")
     BudgetView budget(@PathVariable String projectId) {
         access.requireProject(projectId, WorkspaceRole.VIEWER);
         BudgetService.Budget b = budgets.get(projectId);
-        return new BudgetView(b.dailyLimitUsd(), b.totalLimitUsd(), budgets.spend(projectId));
+        return new BudgetView(b.dailyLimitUsd(), b.totalLimitUsd(), b.taskTokenBudget(), defaultTaskTokens, budgets.spend(projectId));
     }
 
-    record SetBudget(@DecimalMin("0") BigDecimal dailyLimitUsd, @DecimalMin("0") BigDecimal totalLimitUsd) {}
+    record SetBudget(@DecimalMin("0") BigDecimal dailyLimitUsd, @DecimalMin("0") BigDecimal totalLimitUsd,
+                     @Min(10_000) @Max(50_000_000) Long taskTokenBudget) {}
 
     @PutMapping("/api/v1/projects/{projectId}/budget")
     BudgetView setBudget(@PathVariable String projectId, @Valid @RequestBody SetBudget body) {
         String workspaceId = access.requireProject(projectId, WorkspaceRole.ADMIN);
-        budgets.set(workspaceId, projectId, body.dailyLimitUsd(), body.totalLimitUsd());
+        budgets.set(workspaceId, projectId, body.dailyLimitUsd(), body.totalLimitUsd(), body.taskTokenBudget());
         return budget(projectId);
     }
 }

@@ -1,11 +1,11 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, GitPullRequest, Pause, Play, Send } from "lucide-react";
+import { ArrowLeft, GitPullRequest, Pause, Play, Scissors, Send } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../../api/client";
 import type { RunStep } from "../../api/types";
 import { AgentAvatar } from "../../components/AgentAvatar";
-import { Badge, Button, Card, Dot, ErrorText, SectionTitle, SkeletonRows, Textarea } from "../../components/ui";
+import { Badge, Button, Card, Dot, ErrorText, Input, SectionTitle, SkeletonRows, Textarea } from "../../components/ui";
 import { GATES, MR_LABEL, MR_TONE, RUN_TONE, useMergeRequests, useRun } from "../../lib/engineering";
 import { time, tokens, usd } from "../../lib/format";
 import { byId, useAgents, useTasks } from "../../lib/queries";
@@ -28,6 +28,9 @@ export function RunPage() {
   const queryClient = useQueryClient();
   const openAgent = useSelection((s) => s.open);
   const [draft, setDraft] = useState("");
+  const [budgetDraft, setBudgetDraft] = useState<string | null>(null);
+  const [splitting, setSplitting] = useState(false);
+  const [guidance, setGuidance] = useState("");
   const task = tasks.data?.find((t) => t.id === taskId);
   const r = run.data?.run;
   const agent = r ? byId(agents.data)[r.agentId] : undefined;
@@ -40,10 +43,26 @@ export function RunPage() {
     },
   });
 
+  const setBudget = useMutation({
+    mutationFn: (tokenBudget: number) => api.put(`/api/v1/tasks/${taskId}/run/budget`, { tokenBudget }),
+    onSuccess: () => {
+      setBudgetDraft(null);
+      queryClient.invalidateQueries({ queryKey: ["run", taskId] });
+    },
+  });
+  const split = useMutation({
+    mutationFn: () => api.post(`/api/v1/tasks/${taskId}/split`, { guidance: guidance.trim() || null }),
+    onSuccess: () => setSplitting(false),
+  });
+
   if (run.isLoading || tasks.isLoading) return <SkeletonRows rows={8} />;
   const steps = run.data?.steps ?? [];
   const used = r ? r.inputTokens + r.outputTokens : 0;
   const pct = (n: number) => (r ? Math.min(100, (n / r.tokenBudget) * 100) : 0);
+  const open = !!r && r.status !== "DONE" && r.status !== "CANCELLED";
+  const exhausted = !!r && r.status === "BLOCKED" && used >= r.tokenBudget;
+  const canSplit = !!r && (r.status === "PAUSED" || r.status === "BLOCKED") && !!task && task.status !== "CANCELLED" && task.status !== "DONE";
+  const newBudget = Number((budgetDraft ?? "").replace(/\D/g, ""));
 
   return (
     <div className="grid gap-5 lg:grid-cols-[1fr_340px]">
@@ -62,13 +81,50 @@ export function RunPage() {
               {agent?.model && <Badge className="font-mono">{agent.model}</Badge>}
               <span className="ml-auto flex gap-1.5">
                 {r.status === "RUNNING" && <Button variant="ghost" size="sm" disabled={r.pauseRequested || act.isPending} onClick={() => act.mutate({ path: "/pause" })}><Pause size={13} /> {r.pauseRequested ? "Pausing…" : "Pause"}</Button>}
-                {(r.status === "PAUSED" || r.status === "BLOCKED") && <Button variant="ghost" size="sm" disabled={act.isPending} onClick={() => act.mutate({ path: "/resume" })}><Play size={13} /> Resume</Button>}
+                {(r.status === "PAUSED" || r.status === "BLOCKED") && !exhausted && <Button variant="ghost" size="sm" disabled={act.isPending} onClick={() => act.mutate({ path: "/resume" })}><Play size={13} /> Resume</Button>}
+                {canSplit && !exhausted && <Button variant="ghost" size="sm" onClick={() => setSplitting(!splitting)}><Scissors size={13} /> Split</Button>}
               </span>
             </div>
-            {r.blockedReason && <p className="mt-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[13px] text-danger">Blocked: {r.blockedReason}</p>}
+            {r.blockedReason && !exhausted && <p className="mt-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2 text-[13px] text-danger">Blocked: {r.blockedReason}</p>}
+            {exhausted && (
+              <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 px-3 py-3">
+                <p className="text-[13px] font-medium">The token budget of this task is spent ({tokens(used)} of {tokens(r.tokenBudget)}).</p>
+                <p className="mt-0.5 text-[12px] text-muted">Give it more tokens and {agent?.name ?? "the agent"} resumes where it stopped, or ask the Lead to split the task into smaller ones; the first one continues this branch.</p>
+                <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                  <Button variant="signal" size="sm" disabled={setBudget.isPending} onClick={() => setBudget.mutate(r.tokenBudget * 2)}><Play size={13} /> Double it ({tokens(r.tokenBudget * 2)}) and resume</Button>
+                  <Button variant="ghost" size="sm" onClick={() => setBudgetDraft(String(r.tokenBudget * 3))}>Other amount</Button>
+                  <Button variant="ghost" size="sm" onClick={() => setSplitting(true)}><Scissors size={13} /> Ask the Lead to split</Button>
+                </div>
+              </div>
+            )}
+            {splitting && canSplit && (
+              <form className="mt-3 rounded-md border border-line bg-panel px-3 py-3" onSubmit={(e) => { e.preventDefault(); split.mutate(); }}>
+                <p className="text-[13px] font-medium">Ask the Lead to split T-{task?.number}</p>
+                <p className="mt-0.5 text-[12px] text-muted">The Lead writes 2 to 8 smaller tasks that cover every criterion and fit the per-task budget. They take over this task's dependents; this task is cancelled and its branch kept. One model call.</p>
+                <Textarea className="mt-2" rows={2} value={guidance} onChange={(e) => setGuidance(e.target.value)} placeholder="Guidance for the Lead (optional): how you would cut it" />
+                <div className="mt-2 flex gap-2">
+                  <Button type="submit" size="sm" disabled={split.isPending}><Scissors size={13} /> Ask the Lead</Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setSplitting(false)}>Cancel</Button>
+                </div>
+                <ErrorText error={split.error} />
+              </form>
+            )}
+            {split.isSuccess && <p className="mt-3 text-[12px] text-muted">The Lead is splitting the task; the new tasks appear on the board when it is done.</p>}
             <ErrorText error={act.error} />
 
-            <Card className="mt-4" title="Token budget for this task" action={<span className="font-mono text-[12px] text-muted">{tokens(used)} / {tokens(r.tokenBudget)} · {usd(r.costUsd)}</span>}>
+            <Card className="mt-4" title="Token budget for this task" action={<span className="flex items-center gap-2">
+              <span className="font-mono text-[12px] text-muted">{tokens(used)} / {tokens(r.tokenBudget)} · {usd(r.costUsd)}</span>
+              {open && budgetDraft === null && <Button variant="subtle" size="sm" onClick={() => setBudgetDraft(String(r.tokenBudget))}>Change</Button>}
+            </span>}>
+              {budgetDraft !== null && (
+                <form className="mb-3 flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (newBudget > used) setBudget.mutate(newBudget); }}>
+                  <div className="w-40"><Input className="font-mono" inputMode="numeric" autoFocus value={budgetDraft} onChange={(e) => setBudgetDraft(e.target.value)} aria-label="New token budget" /></div>
+                  <span className="text-[12px] text-muted">tokens · more than the {tokens(used)} already used{exhausted ? "; the work resumes" : ""}</span>
+                  <Button type="submit" size="sm" disabled={!(newBudget > used) || setBudget.isPending}>Save</Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setBudgetDraft(null)}>Cancel</Button>
+                </form>
+              )}
+              <ErrorText error={setBudget.error} />
               <div className="flex h-1.5 overflow-hidden rounded-full bg-panel-2">
                 <i className="block bg-testing" style={{ width: `${pct(r.cacheReadTokens)}%` }} />
                 <i className="block bg-active" style={{ width: `${pct(r.inputTokens)}%` }} />
@@ -131,7 +187,7 @@ export function RunPage() {
           <p className="text-[12px] leading-relaxed text-muted">
             Writes stay on the task's branch; CI files, Dockerfiles and .env need your approval. Commands run in a container without
             network (package installs excepted). 40 steps without submitting, the token budget, or the same failing call three times
-            stop the work and tell the Lead.
+            stop the work and tell the Lead. You can raise the budget or have the Lead split the task.
           </p>
         </Card>
       </aside>

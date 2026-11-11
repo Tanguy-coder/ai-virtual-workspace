@@ -234,6 +234,26 @@ public class TaskService {
         dependents.forEach(id -> settle(id, Actor.system()));
     }
 
+    /**
+     * The tasks that waited for {@code fromTaskId} now wait for {@code toTaskIds} instead (the task was split).
+     * The new edges cannot create a cycle: the new tasks only depend on what the original depended on.
+     */
+    void transferDependents(String fromTaskId, List<String> toTaskIds, Actor actor) {
+        List<String> dependents = jdbc.sql("SELECT task_id FROM task_dependencies WHERE depends_on_id = ?").param(fromTaskId)
+                .query(String.class).list();
+        jdbc.sql("DELETE FROM task_dependencies WHERE depends_on_id = ?").param(fromTaskId).update();
+        for (String dependent : dependents) {
+            Task task = find(dependent).orElseThrow();
+            if (CLOSED.contains(task.status())) continue;
+            addDependencies(dependent, toTaskIds, actor);
+        }
+    }
+
+    /** The branch a task's run starts on instead of a new one (a split task continuing committed work). */
+    void baseBranch(String taskId, String branch) {
+        jdbc.sql("UPDATE tasks SET base_branch = ? WHERE id = ?").params(branch, taskId).update();
+    }
+
     /** Moves a task through the execution states (increment 4). Only the execution engine calls this. */
     void advance(String taskId, String to, Actor actor, Map<String, ?> extra) {
         Task task = find(taskId).orElseThrow();

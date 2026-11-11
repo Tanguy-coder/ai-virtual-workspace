@@ -15,7 +15,8 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Service
 public class BudgetService {
-    public record Budget(BigDecimal dailyLimitUsd, BigDecimal totalLimitUsd) {}
+    /** {@code taskTokenBudget}: tokens given to each new task run; null means the platform default. */
+    public record Budget(BigDecimal dailyLimitUsd, BigDecimal totalLimitUsd, Long taskTokenBudget) {}
 
     public record Spend(BigDecimal todayUsd, BigDecimal totalUsd, long callsToday, long callsTotal,
                         long unpricedCalls, long inputTokens, long outputTokens) {}
@@ -27,20 +28,20 @@ public class BudgetService {
     }
 
     public Budget get(String projectId) {
-        return jdbc.sql("SELECT daily_limit_usd, total_limit_usd FROM budgets WHERE project_id = ?")
+        return jdbc.sql("SELECT daily_limit_usd, total_limit_usd, task_token_budget FROM budgets WHERE project_id = ?")
                 .param(projectId)
-                .query((rs, n) -> new Budget(rs.getBigDecimal(1), rs.getBigDecimal(2)))
-                .optional().orElse(new Budget(null, null));
+                .query((rs, n) -> new Budget(rs.getBigDecimal(1), rs.getBigDecimal(2), (Long) rs.getObject(3, Long.class)))
+                .optional().orElse(new Budget(null, null, null));
     }
 
     @Transactional
-    public void set(String workspaceId, String projectId, BigDecimal daily, BigDecimal total) {
+    public void set(String workspaceId, String projectId, BigDecimal daily, BigDecimal total, Long taskTokens) {
         jdbc.sql("""
-                INSERT INTO budgets (project_id, workspace_id, daily_limit_usd, total_limit_usd) VALUES (?, ?, ?, ?)
+                INSERT INTO budgets (project_id, workspace_id, daily_limit_usd, total_limit_usd, task_token_budget) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (project_id) DO UPDATE
                 SET daily_limit_usd = excluded.daily_limit_usd, total_limit_usd = excluded.total_limit_usd,
-                    updated_at = now()
-                """).params(projectId, workspaceId, daily, total).update();
+                    task_token_budget = excluded.task_token_budget, updated_at = now()
+                """).params(projectId, workspaceId, daily, total, taskTokens).update();
     }
 
     public Spend spend(String projectId) {

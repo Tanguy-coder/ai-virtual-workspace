@@ -21,6 +21,8 @@ public class StubModelServer implements AutoCloseable {
     public final List<Captured> requests = new CopyOnWriteArrayList<>();
     /** Text the Anthropic endpoint answers for a given request body; "OK" by default. */
     public volatile Function<String, String> anthropicResponder = body -> "OK";
+    /** Input tokens the Anthropic endpoint reports per call (budgets can be exhausted on purpose). */
+    public volatile int anthropicInputTokens = 12;
 
     public StubModelServer() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -35,8 +37,8 @@ public class StubModelServer implements AutoCloseable {
         server.createContext("/v1/messages", ex -> respond(ex, body -> """
                 {"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5",
                  "content":[{"type":"text","text":%s}],"stop_reason":"end_turn","stop_sequence":null,
-                 "usage":{"input_tokens":12,"output_tokens":3}}
-                """.formatted(TestApi.JSON.writeValueAsString(anthropicResponder.apply(body)))));
+                 "usage":{"input_tokens":%d,"output_tokens":3}}
+                """.formatted(TestApi.JSON.writeValueAsString(anthropicResponder.apply(body)), anthropicInputTokens)));
         server.start();
     }
 

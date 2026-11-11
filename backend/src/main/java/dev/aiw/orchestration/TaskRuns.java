@@ -65,6 +65,33 @@ class TaskRuns {
                 .param(agentId).query(Long.class).single() > 0;
     }
 
+    /** Same, ignoring one run (resuming that run must not count it as the agent's other work). */
+    boolean agentBusyElsewhere(String agentId, String runId) {
+        return jdbc.sql("SELECT count(*) FROM task_runs WHERE agent_id = ? AND id <> ? AND status IN ('RUNNING', 'PAUSED')")
+                .params(agentId, runId).query(Long.class).single() > 0;
+    }
+
+    /** Open runs of an agent (at most one running or paused, plus blocked or submitted ones). */
+    List<TaskRun> openForAgent(String agentId) {
+        return jdbc.sql("SELECT * FROM task_runs WHERE agent_id = ? AND status IN ('RUNNING', 'PAUSED', 'SUBMITTED', 'BLOCKED') ORDER BY started_at")
+                .param(agentId).query(this::map).list();
+    }
+
+    void budget(TaskRun run, long budget, Actor actor) {
+        jdbc.sql("UPDATE task_runs SET token_budget = ?, updated_at = now() WHERE id = ?").params(budget, run.id()).update();
+        events.publish(workspaceOf(run), run.projectId(), "task_run.budget_changed", actor, new Subject("task_run", run.id()),
+                Map.of("taskId", run.taskId(), "agentId", run.agentId(), "from", run.tokenBudget(), "to", budget));
+    }
+
+    /** Marks a run as paused for a meeting (it resumes when the meeting ends); null clears the mark. */
+    void pausedForMeeting(String runId, String meetingId) {
+        jdbc.sql("UPDATE task_runs SET paused_for_meeting = ?, updated_at = now() WHERE id = ?").params(meetingId, runId).update();
+    }
+
+    List<TaskRun> pausedFor(String meetingId) {
+        return jdbc.sql("SELECT * FROM task_runs WHERE paused_for_meeting = ?").param(meetingId).query(this::map).list();
+    }
+
     void status(TaskRun run, String status, String reason) {
         jdbc.sql("""
                 UPDATE task_runs SET status = ?, blocked_reason = ?, pause_requested = false, updated_at = now(),

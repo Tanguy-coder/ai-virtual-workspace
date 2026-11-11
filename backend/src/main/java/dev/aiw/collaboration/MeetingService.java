@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
@@ -47,6 +48,7 @@ public class MeetingService {
     /** Earlier contributions are clipped to this many characters in later turns' prompts. */
     private static final int CLIPPED_TURN = 300;
 
+    public static final String REALIGNMENT = "REALIGNMENT";
     static final String TURN = "MEETING_TURN";
     static final String SYNTHESIS = "MEETING_SYNTHESIS";
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
@@ -62,10 +64,12 @@ public class MeetingService {
     private final AuditLog audit;
     private final ApplicationEventPublisher appEvents;
     private final TransactionTemplate tx;
+    private final ObjectProvider<ParticipantStatus> status;
 
     MeetingService(JdbcClient jdbc, JsonMapper json, AgentService agents, AgentJobs jobs, AgentRunner runner,
                    CollaborationService collaboration, MemoryService memory, EventPublisher events, AuditLog audit,
-                   ApplicationEventPublisher appEvents, TransactionTemplate tx) {
+                   ApplicationEventPublisher appEvents, TransactionTemplate tx, ObjectProvider<ParticipantStatus> status) {
+        this.status = status;
         this.jdbc = jdbc;
         this.json = json;
         this.agents = agents;
@@ -93,6 +97,19 @@ public class MeetingService {
     public List<String> participants(String meetingId) {
         return jdbc.sql("SELECT agent_id FROM meeting_participants WHERE meeting_id = ? ORDER BY turn_order")
                 .param(meetingId).query(String.class).list();
+    }
+
+    /** True while the agent sits in a meeting that is in progress or writing its minutes. */
+    public boolean inOpenMeeting(String agentId) {
+        return jdbc.sql("""
+                SELECT count(*) FROM meeting_participants p JOIN meetings m ON m.id = p.meeting_id
+                WHERE p.agent_id = ? AND m.status IN ('IN_PROGRESS', 'SYNTHESIZING')
+                """).param(agentId).query(Long.class).single() > 0;
+    }
+
+    public Optional<Meeting> openRealignment(String projectId) {
+        return jdbc.sql("SELECT * FROM meetings WHERE project_id = ? AND purpose = 'REALIGNMENT' AND status IN ('IN_PROGRESS', 'SYNTHESIZING') LIMIT 1")
+                .param(projectId).query(this::map).optional();
     }
 
     // ---- commands ----
@@ -162,6 +179,7 @@ public class MeetingService {
         events.publish(m.workspaceId(), m.projectId(), "meeting.ended", actor, new Subject("meeting", meetingId),
                 Map.of("title", m.title(), "outcome", "CANCELLED"));
         audit.record(m.workspaceId(), actor, "meeting.cancel", "meeting", meetingId, AuditLog.Decision.RECORDED, Map.of());
+        appEvents.publishEvent(new MeetingEnded(m.workspaceId(), m.projectId(), meetingId, m.purpose(), "CANCELLED"));
         return find(meetingId).orElseThrow();
     }
 
@@ -185,6 +203,21 @@ public class MeetingService {
         List<String> people = participants(m.id());
         Map<String, Agent> byId = people.stream().map(id -> agents.find(id).orElseThrow())
                 .collect(Collectors.toMap(Agent::id, Function.identity()));
+        boolean realign = REALIGNMENT.equals(m.purpose());
+        boolean opening = agent.id().equals(m.organizerId()) && round == 1;
+        String work = realign ? status.stream().map(p -> p.of(agent.id())).findFirst().orElse("") : "";
+        String ask = realign
+                ? (opening
+                        ? "As the organizer, open the meeting: restate the CTO's concern, what must be decided, and ask each person for their status and problems."
+                        : "Contribute from your role as " + agent.title() + ": your status in one sentence; then any problem that blocks or slows "
+                        + "you, stated precisely (what fails, what you tried, what you need). If a teammate exposed a problem in your area, "
+                        + "propose a concrete solution. Say how the work should be realigned with the CTO's concern. Do not repeat what was "
+                        + "already said.")
+                        + (round > 1 ? " If you have nothing new to add, reply with exactly " + PASS + "." : "")
+                : "Contribute from your role as " + agent.title() + ": what you will own, the concerns, risks and dependencies you see, "
+                        + "proposals, and questions for specific people. Disagree openly when you disagree. Do not repeat what was already said. "
+                        + (opening ? "As the organizer, open the meeting: state its goal and what you expect from each person."
+                        : round > 1 ? "If you have nothing new to add, reply with exactly " + PASS + "." : "");
         String prompt = """
                 You are in the meeting "%s", organized by %s.
 
@@ -193,20 +226,16 @@ public class MeetingService {
                 </agenda>
 
                 Participants: %s.
-
+                %s
                 <transcript>
                 %s</transcript>
 
-                It is your turn (round %d of %d). Contribute from your role as %s: what you will own, the concerns, \
-                risks and dependencies you see, proposals, and questions for specific people. Disagree openly when you \
-                disagree. Do not repeat what was already said. %s Keep it under 200 words, plain text, no preamble.""".formatted(
+                It is your turn (round %d of %d). %s Keep it under 200 words, plain text, no preamble.""".formatted(
                 m.title(), byId.get(m.organizerId()).name(), m.agenda(),
                 people.stream().map(id -> byId.get(id).name() + " (" + byId.get(id).title() + ")")
                         .collect(Collectors.joining(", ")),
-                transcript(m.threadId(), byId, people.size()), round, m.rounds(), agent.title(),
-                agent.id().equals(m.organizerId()) && round == 1
-                        ? "As the organizer, open the meeting: state its goal and what you expect from each person."
-                        : round > 1 ? "If you have nothing new to add, reply with exactly " + PASS + "." : "");
+                work.isBlank() ? "" : "\n<your_work recorded_by=\"platform\">\n" + work + "</your_work>\n",
+                transcript(m.threadId(), byId, people.size()), round, m.rounds(), ask);
         // Each participant repeats the same context every round: cache it only when there are several rounds.
         AgentRunner.Context context = runner.context(agent, m.title() + " " + m.agenda());
         String reply = runner.complete(job, agent, m.rounds() > 1 ? context : context.oneShot(),
@@ -271,8 +300,13 @@ public class MeetingService {
                 {"summary": "3-6 sentences",
                  "decisions": [{"title": "short", "detail": "what was decided and why"}],
                  "disagreements": [{"topic": "...", "positions": "who thinks what"}],
-                 "actionItems": [{"title": "imperative sentence", "owner": "exact participant name or null", "due": "free text or null"}]}
+                 "actionItems": [{"title": "imperative sentence", "owner": "exact participant name or null", "due": "free text or null"}]%s}
                 Owners must be one of: %s.""".formatted(m.title(), m.agenda(), transcript(m.threadId(), byId, Integer.MAX_VALUE),
+                REALIGNMENT.equals(m.purpose()) ? """
+                ,
+                 "problems": [{"raisedBy": "exact participant name", "task": 12 or null, "problem": "what blocks", \
+                "solution": "the solution agreed in the meeting, precise enough to act on, or null if none was found"}]"""
+                        : "",
                 byId.values().stream().map(Agent::name).collect(Collectors.joining(", ")));
         // Extraction from the transcript: the economy model, no specification (docs/09).
         JsonNode minutes = runner.completeJson(job, organizer, runner.context(organizer, m.title() + " " + m.agenda(), 0, 0).oneShot(),
@@ -282,6 +316,11 @@ public class MeetingService {
                         String owner = item.path("owner").isString() ? item.path("owner").asString() : null;
                         if (owner != null && !byName.containsKey(owner.toLowerCase())) {
                             throw new AgentRunner.InvalidOutput("Unknown action item owner \"" + owner + "\".");
+                        }
+                    }
+                    for (JsonNode p : node.path("problems")) {
+                        if (!byName.containsKey(text(p, "raisedBy").toLowerCase())) {
+                            throw new AgentRunner.InvalidOutput("Unknown problem author \"" + text(p, "raisedBy") + "\".");
                         }
                     }
                 });
@@ -308,6 +347,20 @@ public class MeetingService {
         stored.put("decisions", decisions);
         stored.put("disagreements", disagreements);
         stored.put("actionItems", actions);
+        if (REALIGNMENT.equals(m.purpose())) {
+            List<Map<String, Object>> problems = new ArrayList<>();
+            for (JsonNode p : minutes.path("problems")) {
+                Map<String, Object> item = new HashMap<>();
+                item.put("raisedByAgentId", byName.get(text(p, "raisedBy").toLowerCase()));
+                item.put("taskNumber", p.path("task").isInt() ? p.path("task").asInt()
+                        : p.path("task").isString() ? parseTaskNumber(p.path("task").asString()) : null);
+                item.put("problem", text(p, "problem"));
+                item.put("solution", p.path("solution").isString() && !p.path("solution").asString().isBlank() ? p.path("solution").asString() : null);
+                item.put("delivered", false);
+                problems.add(item);
+            }
+            stored.put("problems", problems);
+        }
         tx.executeWithoutResult(s -> {
             int updated = jdbc.sql("""
                     UPDATE meetings SET status = 'ENDED', minutes = ?::jsonb, ended_at = now()
@@ -324,7 +377,7 @@ public class MeetingService {
                             "actionItems", actions.size()));
             events.publish(m.workspaceId(), m.projectId(), "meeting.ended", Actor.agent(organizer.id()),
                     new Subject("meeting", m.id()), Map.of("title", m.title(), "outcome", "ENDED"));
-            appEvents.publishEvent(new MeetingEnded(m.workspaceId(), m.projectId(), m.id(), m.purpose()));
+            appEvents.publishEvent(new MeetingEnded(m.workspaceId(), m.projectId(), m.id(), m.purpose(), "ENDED"));
         });
     }
 
@@ -388,6 +441,21 @@ public class MeetingService {
             sb.append("[").append(who).append("]\n").append(content).append("\n\n");
         }
         return sb.isEmpty() ? "(nobody has spoken yet)\n" : sb.toString();
+    }
+
+    private static Integer parseTaskNumber(String s) {
+        String digits = s.replaceAll("\\D", "");
+        if (digits.isEmpty() || digits.length() > 8) return null;
+        return Integer.valueOf(digits);
+    }
+
+    /** Records that a problem's solution reached the task's run (called by orchestration). */
+    @Transactional
+    public void markProblemDelivered(String meetingId, int index) {
+        jdbc.sql("""
+                UPDATE meetings SET minutes = jsonb_set(minutes, ARRAY['problems', CAST(? AS TEXT), 'delivered'], 'true'::jsonb)
+                WHERE id = ? AND minutes -> 'problems' IS NOT NULL
+                """).params(index, meetingId).update();
     }
 
     private static String text(JsonNode node, String field) {

@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, CheckCircle2, Circle, Lock, LockOpen, Pencil, Plus, Send, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { api } from "../api/client";
 import type { Agent, EventRecord, Message, Task } from "../api/types";
 import { describe } from "../lib/events";
 import { relative, time } from "../lib/format";
 import { byId, useAgents, useTasks } from "../lib/queries";
+import { useDismiss } from "../lib/dismiss";
 import { useSelection } from "../lib/selection";
 import { PRIORITY_TONE, STATUS_TONE, statusLabel } from "../lib/tasks";
 import { Link } from "react-router";
@@ -35,11 +36,8 @@ export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
   const [reason, setReason] = useState("");
   const [editing, setEditing] = useState(false);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [close]);
+  const panel = useRef<HTMLElement>(null);
+  useDismiss(panel, close, !!taskId);
   useEffect(() => { setTab("details"); setBlocking(false); setEditing(false); }, [taskId]);
 
   const refresh = () => {
@@ -62,7 +60,7 @@ export function TaskDrawer({ workspaceId }: { workspaceId: string }) {
   const candidates = (tasks.data ?? []).filter((x) => t && x.id !== t.id && !t.dependsOn.includes(x.id) && x.status !== "CANCELLED");
 
   return (
-    <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[560px] flex-col slide-in border-l border-line-strong bg-panel shadow-panel" aria-label="Task">
+    <aside ref={panel} data-drawer className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[560px] flex-col slide-in border-l border-line-strong bg-panel shadow-panel" aria-label="Task">
       {t && (
         <>
           <header className="border-b border-line p-5">

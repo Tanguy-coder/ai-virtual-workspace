@@ -79,11 +79,14 @@ public class LeadService {
     private final EventPublisher events;
     private final AuditLog audit;
     private final TransactionTemplate tx;
+    private final org.springframework.beans.factory.ObjectProvider<TaskExecution> execution;
 
     LeadService(JdbcClient jdbc, JsonMapper json, AgentService agents, AgentJobs jobs, AgentRunner runner,
                 ProjectService projects, MemoryService memory, MeetingService meetings,
                 CollaborationService collaboration, TaskService tasks, ProviderService providers,
-                PricingService pricing, EventPublisher events, AuditLog audit, TransactionTemplate tx) {
+                PricingService pricing, EventPublisher events, AuditLog audit, TransactionTemplate tx,
+                org.springframework.beans.factory.ObjectProvider<TaskExecution> execution) {
+        this.execution = execution;
         this.jdbc = jdbc;
         this.json = json;
         this.agents = agents;
@@ -543,7 +546,7 @@ public class LeadService {
     /** Step 8: once the kickoff minutes are published, the Lead breaks the project down into tasks. */
     @EventListener
     void onMeetingEnded(MeetingEnded event) {
-        if (!"KICKOFF".equals(event.purpose())) return;
+        if (!"KICKOFF".equals(event.purpose()) || !event.ended()) return;
         agents.lead(event.projectId()).ifPresent(lead -> jobs.enqueue(event.workspaceId(), event.projectId(), lead.id(),
                 PLAN, Map.of("meetingId", event.meetingId()), event.meetingId()));
     }
@@ -570,8 +573,9 @@ public class LeadService {
                 %s</team>
 
                 Rules:
-                - 5 to 30 tasks, each deliverable by one agent in at most 5 days, ordered so foundations come first.
-                - Each task has a short imperative title, a description, and 2 to 6 objective, verifiable acceptance \
+                - 5 to 60 tasks, ordered so foundations come first.
+                %s
+                - Each task has a short imperative title, a description, and objective, verifiable acceptance \
                 criteria (tests that pass, endpoints that respond, documents that exist...).
                 - dependsOn lists the refs of tasks that must be finished first. No cycles.
                 - assignee is the exact name of a team member (you may assign yourself coordination tasks only).
@@ -581,9 +585,10 @@ public class LeadService {
                 JSON shape:
                 {"tasks": [{"ref": "t1", "title": "...", "description": "...", "acceptanceCriteria": ["..."],
                             "dependsOn": [], "assignee": "Name", "estimateDays": 2, "priority": "HIGH", "brief": "..."}]}"""
-                .formatted(json.writeValueAsString(kickoff.minutes()), people);
+                .formatted(json.writeValueAsString(kickoff.minutes()), people,
+                        TaskSizing.rules(execution.getObject().taskTokenBudget(job.projectId())));
         JsonNode out = runner.completeJson(job, lead, runner.context(lead, "architecture decisions plan tasks deliverables", 8_000, 8_000).oneShot(), prompt,
-                32_000, "high", "Project plan and task assignment", node -> validatePlan(node, byName));
+                32_000, "high", "Project plan and task assignment", node -> validateTasks(node, byName, 1, 60));
         tx.executeWithoutResult(s -> {
             if (tasks.hasPlanFrom(job.projectId(), meetingId)) return;
             Actor actor = Actor.agent(lead.id());
@@ -618,10 +623,11 @@ public class LeadService {
         });
     }
 
-    private void validatePlan(JsonNode node, Map<String, Agent> byName) {
+    /** Checks a list of tasks written by the Lead (plan or split): refs, titles, criteria, assignees, no cycle. */
+    static void validateTasks(JsonNode node, Map<String, Agent> byName, int min, int max) {
         JsonNode list = node.path("tasks");
-        if (!list.isArray() || list.size() < 1) throw new AgentRunner.InvalidOutput("\"tasks\" must list tasks.");
-        if (list.size() > 40) throw new AgentRunner.InvalidOutput("At most 30 tasks.");
+        if (!list.isArray() || list.size() < min) throw new AgentRunner.InvalidOutput("\"tasks\" must list at least " + min + " tasks.");
+        if (list.size() > max) throw new AgentRunner.InvalidOutput("At most " + max + " tasks.");
         Set<String> refs = new HashSet<>();
         for (JsonNode t : list) {
             String ref = text(t, "ref");

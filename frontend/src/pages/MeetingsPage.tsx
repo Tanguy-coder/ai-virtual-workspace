@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, CircleSlash, Gavel, ListTodo, MessageSquareWarning, Mic, Plus, Send, Video, X } from "lucide-react";
+import { CheckCircle2, CircleSlash, Compass, Gavel, LifeBuoy, ListTodo, MessageSquareWarning, Mic, Plus, Send, Video, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { api } from "../api/client";
@@ -18,6 +18,8 @@ const STATUS: Record<Meeting["status"], { label: string; tone: Tone }> = {
   CANCELLED: { label: "Cancelled", tone: "muted" },
 };
 
+const PURPOSE: Record<Meeting["purpose"], string> = { KICKOFF: "Kickoff", ADHOC: "Meeting", REALIGNMENT: "Realignment" };
+
 /** UX §7 Meeting Room: agenda, participants, turns, the CTO's voice, then minutes with decisions and actions. */
 export function MeetingsPage() {
   const { workspaceId = "", projectId = "", meetingId } = useParams();
@@ -28,15 +30,23 @@ export function MeetingsPage() {
   });
   const agents = useAgents(projectId);
   const [convening, setConvening] = useState(false);
+  const [realigning, setRealigning] = useState(false);
+  const [realignConcern, setRealignConcern] = useState<string | null>(null);
   const selected = meetingId ?? meetings.data?.[0]?.id;
   const base = `/w/${workspaceId}/p/${projectId}/meetings`;
 
   return (
     <div className="mx-auto max-w-7xl">
       <PageHeader title="Meetings" subtitle="Every turn is a real model call; minutes feed shared memory and the plan."
-        action={<Button onClick={() => setConvening(true)}><Plus size={14} /> Convene a meeting</Button>} />
+        action={<div className="flex gap-2">
+          <Button onClick={() => { setRealigning(true); setConvening(false); setRealignConcern(null); }}><Compass size={14} /> Realign the project</Button>
+          <Button variant="ghost" onClick={() => { setConvening(true); setRealigning(false); }}><Plus size={14} /> Convene a meeting</Button>
+        </div>} />
+      {realigning && realignConcern === null && <Realign projectId={projectId} onClose={() => setRealigning(false)} onMyself={(c) => setRealignConcern(c)} />}
+      {realigning && realignConcern !== null && <Convene projectId={projectId} agents={agents.data ?? []} realignConcern={realignConcern}
+        onDone={(id) => { setRealigning(false); setRealignConcern(null); if (id) navigate(`${base}/${id}`); }} />}
       {convening && <Convene projectId={projectId} agents={agents.data ?? []} onDone={(id) => { setConvening(false); if (id) navigate(`${base}/${id}`); }} />}
-      {meetings.isSuccess && meetings.data.length === 0 && !convening && (
+      {meetings.isSuccess && meetings.data.length === 0 && !convening && !realigning && (
         <Empty icon={<Video size={18} />} title="No meeting yet">
           The Lead runs the kickoff meeting once you approve the team. You can also convene agents yourself.
         </Empty>
@@ -51,7 +61,7 @@ export function MeetingsPage() {
                   <p className="truncate text-[13px] font-semibold">{m.title}</p>
                   <Badge tone={STATUS[m.status].tone}>{STATUS[m.status].label}</Badge>
                 </div>
-                <p className="mt-1 text-[12px] text-muted">{m.purpose === "KICKOFF" ? "Kickoff" : "Meeting"} · {relative(m.startedAt)}</p>
+                <p className="mt-1 text-[12px] text-muted">{PURPOSE[m.purpose]} · {relative(m.startedAt)}</p>
               </Link>
             ))}
           </nav>
@@ -91,14 +101,15 @@ function Room({ meetingId, agents, projectId }: { meetingId: string; agents: Rec
   if (!d) return <Card><p className="text-[13px] text-muted">Loading…</p></Card>;
   const m = d.meeting;
   const open = m.status === "IN_PROGRESS" || m.status === "SYNTHESIZING";
+  const endable = open || m.status === "FAILED";
   const nextSpeaker = m.status === "IN_PROGRESS" ? d.participantIds[m.turnIndex] : m.status === "SYNTHESIZING" ? m.organizerId : null;
 
   return (
     <div className="min-w-0 space-y-5">
-      <Card title={m.title} subtitle={`${m.purpose === "KICKOFF" ? "Kickoff" : "Meeting"} · started ${relative(m.startedAt)} · ${m.rounds} round${m.rounds > 1 ? "s" : ""}`}
+      <Card title={m.title} subtitle={`${PURPOSE[m.purpose]} · started ${relative(m.startedAt)} · ${m.rounds} round${m.rounds > 1 ? "s" : ""}${m.purpose === "REALIGNMENT" && open ? " · the participants' work is paused until it ends" : ""}`}
         action={<div className="flex items-center gap-2">
           <Badge tone={STATUS[m.status].tone}>{STATUS[m.status].label}</Badge>
-          {open && <Button size="sm" variant="danger" onClick={() => cancel.mutate()}><CircleSlash size={13} /> End</Button>}
+          {endable && <Button size="sm" variant="danger" onClick={() => cancel.mutate()}><CircleSlash size={13} /> End</Button>}
         </div>}>
         <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_220px]">
           <div>
@@ -191,6 +202,30 @@ function Room({ meetingId, agents, projectId }: { meetingId: string; agents: Rec
               </ul>
             </div>
           </div>
+          {m.minutes.problems && (
+            <div className="mt-5">
+              <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-faint"><LifeBuoy size={12} /> Problems raised</p>
+              {m.minutes.problems.length === 0 && <p className="text-[12px] text-muted">None raised.</p>}
+              <ul className="divide-y divide-line rounded-lg border border-line">
+                {m.minutes.problems.map((x, i) => {
+                  const who = x.raisedByAgentId ? agents[x.raisedByAgentId] : undefined;
+                  return (
+                    <li key={i} className="grid grid-cols-[22px_1fr] gap-x-3 px-3 py-2.5">
+                      {who ? <AgentAvatar agent={who} size={22} /> : <span />}
+                      <div className="min-w-0">
+                        <p className="text-[13px]">{x.problem}</p>
+                        <p className="text-[11px] text-muted">{who?.name ?? "A participant"}{x.taskNumber != null && ` · T-${x.taskNumber}`}</p>
+                        {x.solution
+                          ? <p className="mt-1 text-[12px]"><span className="font-medium text-ok">Solution · </span>{x.solution}
+                              <span className="text-faint"> · {x.delivered ? "sent to the task's work" : "no open work on that task to send it to"}</span></p>
+                          : <p className="mt-1 text-[12px] text-warn">No solution found in the meeting</p>}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
           <div className="mt-5">
             <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-faint"><ListTodo size={12} /> Action items</p>
             {m.minutes.actionItems.length === 0 && <p className="text-[12px] text-muted">None.</p>}
@@ -219,27 +254,32 @@ function Room({ meetingId, agents, projectId }: { meetingId: string; agents: Rec
   );
 }
 
-function Convene({ projectId, agents, onDone }: { projectId: string; agents: Agent[]; onDone: (id?: string) => void }) {
+function Convene({ projectId, agents, onDone, realignConcern }: { projectId: string; agents: Agent[]; onDone: (id?: string) => void; realignConcern?: string }) {
   const active = agents.filter((a) => a.status === "ACTIVE");
-  const [title, setTitle] = useState("");
+  const realign = realignConcern !== undefined;
+  const [title, setTitle] = useState(realign ? "Realignment" : "");
   const [agenda, setAgenda] = useState("");
   const [organizerId, setOrganizerId] = useState(active.find((a) => a.lead)?.id ?? "");
-  const [participants, setParticipants] = useState<string[]>([]);
-  const [rounds, setRounds] = useState("1");
+  const [participants, setParticipants] = useState<string[]>(realign ? active.filter((a) => !a.lead).slice(0, 11).map((a) => a.id) : []);
+  const [rounds, setRounds] = useState(realign ? "2" : "1");
   const convene = useMutation({
-    mutationFn: () => api.post<Meeting>(`/api/v1/projects/${projectId}/meetings`, {
-      title, agenda, organizerId, participantIds: participants.filter((p) => p !== organizerId), rounds: Number(rounds),
-    }),
+    mutationFn: async () => {
+      const body = { title, agenda, organizerId, participantIds: participants.filter((p) => p !== organizerId), rounds: Number(rounds) };
+      if (!realign) return api.post<Meeting>(`/api/v1/projects/${projectId}/meetings`, body);
+      const r = await api.post<{ meeting: Meeting }>(`/api/v1/projects/${projectId}/realignment`, { ...body, concern: realignConcern, delegate: false });
+      return r.meeting;
+    },
     onSuccess: (m) => onDone(m.id),
   });
   const count = new Set([organizerId, ...participants]).size;
   return (
-    <Card className="mb-5" title="Convene a meeting" subtitle={`${count} participant${count > 1 ? "s" : ""} · each turn is a model call (${count * Number(rounds) + 1} calls in total)`}
+    <Card className="mb-5" title={realign ? "Convene the realignment meeting" : "Convene a meeting"} subtitle={`${count} participant${count > 1 ? "s" : ""} · each turn is a model call (${count * Number(rounds) + 1} calls in total)${realign ? " · their running work pauses until it ends" : ""}`}
       action={<button onClick={() => onDone()} className="rounded-lg p-1 text-muted hover:bg-panel-2" aria-label="Close"><X size={16} /></button>}>
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-4">
           <Field label="Title"><Input autoFocus maxLength={200} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="API contract review" /></Field>
-          <Field label="Agenda"><Textarea rows={5} value={agenda} onChange={(e) => setAgenda(e.target.value)} placeholder={"1. …\n2. …"} /></Field>
+          {realign && <p className="rounded-md border border-line bg-panel-2 px-3 py-2 text-[12px] text-muted">Your concern opens the agenda: “{realignConcern}”</p>}
+          <Field label={realign ? "Agenda (optional, after your concern)" : "Agenda"}><Textarea rows={5} value={agenda} onChange={(e) => setAgenda(e.target.value)} placeholder={realign ? "1. Status and problems of each person\n2. Solutions\n3. Decisions" : "1. …\n2. …"} /></Field>
         </div>
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
@@ -266,11 +306,45 @@ function Convene({ projectId, agents, onDone }: { projectId: string; agents: Age
             </div>
           </Field>
           <ErrorText error={convene.error} />
-          <Button disabled={!title.trim() || !agenda.trim() || !organizerId || count < 2 || convene.isPending} onClick={() => convene.mutate()}>
+          <Button disabled={!title.trim() || (!realign && !agenda.trim()) || !organizerId || count < 2 || convene.isPending} onClick={() => convene.mutate()}>
             <Video size={14} /> Start the meeting
           </Button>
         </div>
       </div>
+    </Card>
+  );
+}
+
+/**
+ * Realignment mid-project: the CTO states the concern, then either orders the Lead to organize the meeting (the Lead
+ * reads the recorded project state and picks the agenda and the participants) or convenes it directly.
+ */
+function Realign({ projectId, onClose, onMyself }: { projectId: string; onClose: () => void; onMyself: (concern: string) => void }) {
+  const [concern, setConcern] = useState("");
+  const delegate = useMutation({
+    mutationFn: () => api.post(`/api/v1/projects/${projectId}/realignment`, { concern, delegate: true }),
+  });
+  return (
+    <Card className="mb-5" title="Realign the project" subtitle="A meeting in the middle of the project: running work pauses, each person exposes their problems, the team agrees on solutions"
+      action={<button onClick={onClose} className="rounded-lg p-1 text-muted hover:bg-panel-2" aria-label="Close"><X size={16} /></button>}>
+      {delegate.isSuccess ? (
+        <p className="text-[13px] text-muted">
+          The Lead is preparing the agenda and choosing the participants from the recorded project state (one model call). The meeting
+          appears in this list when it starts; anyone with a blocked task attends.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <Field label="What worries you">
+            <Textarea autoFocus rows={3} value={concern} onChange={(e) => setConcern(e.target.value)}
+              placeholder="We are drifting from the payments scope; T-12 has been blocked for a day…" />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={!concern.trim() || delegate.isPending} onClick={() => delegate.mutate()}><Compass size={14} /> Ask the Lead to organize it</Button>
+            <Button variant="ghost" disabled={!concern.trim()} onClick={() => onMyself(concern.trim())}>Organize it myself</Button>
+          </div>
+          <ErrorText error={delegate.error} />
+        </div>
+      )}
     </Card>
   );
 }

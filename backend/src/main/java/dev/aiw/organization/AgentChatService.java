@@ -23,13 +23,19 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Direct conversation between humans and an agent. Posting a message returns immediately; the agent's
@@ -44,6 +50,10 @@ public class AgentChatService {
     /** Specification excerpts in the chat prompt, chosen by the agent's role so the prefix stays cacheable. */
     private static final int SPEC_EXCERPTS = 5_000;
     private static final long MAX_TOKENS = 4_000;
+    /** Orders the Lead may give in one reply (docs/12). */
+    private static final int MAX_ORDERS = 10;
+    private static final Pattern ORDERS = Pattern.compile("(?s)<orders>(.*?)</orders>");
+    private static final TypeReference<List<LeadCommands.Outcome>> OUTCOMES = new TypeReference<>() {};
 
     private final JdbcClient jdbc;
     private final AgentService agents;
@@ -51,17 +61,21 @@ public class AgentChatService {
     private final ModelGateway gateway;
     private final EventPublisher events;
     private final TransactionTemplate tx;
+    private final ObjectProvider<LeadCommands> commands;
+    private final JsonMapper json;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Map<String, ReentrantLock> locks = new ConcurrentHashMap<>();
 
     AgentChatService(JdbcClient jdbc, AgentService agents, ProjectService projects, ModelGateway gateway,
-                     EventPublisher events, TransactionTemplate tx) {
+                     EventPublisher events, TransactionTemplate tx, ObjectProvider<LeadCommands> commands, JsonMapper json) {
         this.jdbc = jdbc;
         this.agents = agents;
         this.projects = projects;
         this.gateway = gateway;
         this.events = events;
         this.tx = tx;
+        this.commands = commands;
+        this.json = json;
     }
 
     public List<AgentMessage> history(String agentId, int limit) {
@@ -125,12 +139,20 @@ public class AgentChatService {
             return;
         }
         agents.beginThinking(agentId, Map.of("model", agent.model()));
+        // The Lead carries out the CTO's orders: it sees the recorded project state and may end its reply with orders.
+        LeadCommands lead = agent.lead() ? commands.getIfAvailable() : null;
+        List<ChatTurn> turns = turns(agentId);
+        if (lead != null && !turns.isEmpty() && turns.getLast().role() == ChatTurn.Role.USER) {
+            ChatTurn last = turns.removeLast();
+            turns.add(new ChatTurn(ChatTurn.Role.USER, "<project_state recorded_by=\"platform\">\n" + lead.state(agent.projectId())
+                    + "</project_state>\n\n" + last.text()));
+        }
         ModelResult result;
         try {
             // Stable system prompt and cached conversation: each reply re-reads the history from the provider cache.
             result = gateway.complete(new ModelRequest(agent.workspaceId(), agent.projectId(), agentId, agent.providerId(),
-                    agent.model(), systemPrompt(agent), null, turns(agentId), MAX_TOKENS, "medium",
-                    ModelRequest.Tier.STANDARD, ModelRequest.Cache.CONVERSATION));
+                    agent.model(), systemPrompt(agent) + (lead == null ? "" : "\n" + lead.manual()), null, turns, MAX_TOKENS,
+                    "medium", ModelRequest.Tier.STANDARD, ModelRequest.Cache.CONVERSATION));
         } catch (ModelCallException | ApiException e) {
             agents.endThinking(agentId);
             fail(agent, pendingIds, e.getMessage());
@@ -139,18 +161,53 @@ public class AgentChatService {
         String reply = result.refused()
                 ? "I can't help with this request (the model declined it)."
                 : result.text().isBlank() ? "(The model returned an empty reply.)" : result.text();
+        List<LeadCommands.Outcome> outcomes = List.of();
+        if (lead != null && !result.refused()) {
+            Matcher m = ORDERS.matcher(reply);
+            if (m.find()) {
+                outcomes = carryOut(lead, agent, pendingIds, m.group(1));
+                reply = ORDERS.matcher(reply).replaceAll("").strip();
+            }
+        }
+        String content = reply;
+        String actions = outcomes.isEmpty() ? null : json.writeValueAsString(outcomes);
         String replyId = Ids.newId();
         tx.executeWithoutResult(s -> {
             jdbc.sql("""
-                    INSERT INTO agent_messages (id, workspace_id, agent_id, author_kind, author_id, content, status)
-                    VALUES (?, ?, ?, 'AGENT', ?, ?, 'FINAL')
-                    """).params(replyId, agent.workspaceId(), agentId, agentId, reply).update();
+                    INSERT INTO agent_messages (id, workspace_id, agent_id, author_kind, author_id, content, status, actions)
+                    VALUES (?, ?, ?, 'AGENT', ?, ?, 'FINAL', CAST(? AS jsonb))
+                    """).params(replyId, agent.workspaceId(), agentId, agentId, content, actions).update();
             jdbc.sql("UPDATE agent_messages SET status = 'ANSWERED' WHERE id IN (:ids)").param("ids", pendingIds).update();
             events.publish(agent.workspaceId(), agent.projectId(), "message.sent", Actor.agent(agentId),
                     new Subject("agent", agentId), Map.of("messageId", replyId, "from", agent.name(),
                             "refused", result.refused()));
             agents.endThinking(agentId);
         });
+    }
+
+    /** Runs the orders of a Lead reply with the rights of the CTO who wrote the latest message. */
+    private List<LeadCommands.Outcome> carryOut(LeadCommands lead, Agent agent, List<String> pendingIds, String block) {
+        String userId = jdbc.sql("""
+                SELECT author_id FROM agent_messages WHERE id IN (:ids) AND author_kind = 'HUMAN' ORDER BY created_at DESC LIMIT 1
+                """).param("ids", pendingIds).query(String.class).optional().orElse(null);
+        if (userId == null) return List.of();
+        JsonNode node;
+        try {
+            node = json.readTree(block.strip().replaceAll("^```(?:json)?|```$", "").strip());
+        } catch (RuntimeException e) {
+            return List.of(new LeadCommands.Outcome("orders", false, "The orders could not be read; nothing was done"));
+        }
+        if (node.isObject() && node.has("orders")) node = node.path("orders");
+        if (node.isObject()) node = json.createArrayNode().add(node);
+        List<LeadCommands.Outcome> out = new ArrayList<>();
+        for (JsonNode order : node) {
+            if (out.size() == MAX_ORDERS) {
+                out.add(new LeadCommands.Outcome("orders", false, "Only " + MAX_ORDERS + " orders per reply; the rest was ignored"));
+                break;
+            }
+            out.add(lead.execute(agent.projectId(), userId, agent.id(), order));
+        }
+        return out;
     }
 
     private void fail(Agent agent, List<String> pendingIds, String error) {
@@ -172,11 +229,18 @@ public class AgentChatService {
         for (AgentMessage m : history) {
             ChatTurn.Role role = "HUMAN".equals(m.authorKind()) ? ChatTurn.Role.USER : ChatTurn.Role.ASSISTANT;
             if (turns.isEmpty() && role == ChatTurn.Role.ASSISTANT) continue;
+            String text = m.content();
+            if (m.actions() != null && !m.actions().isEmpty()) {
+                // The Lead learns what really happened to its orders.
+                text += "\n[Outcome of your orders, recorded by the platform: " + m.actions().stream()
+                        .map(o -> o.action() + " " + (o.ok() ? "done" : "refused") + ": " + o.detail())
+                        .reduce((a, b) -> a + "; " + b).orElse("") + "]";
+            }
             if (!turns.isEmpty() && turns.getLast().role() == role) {
                 ChatTurn last = turns.removeLast();
-                turns.add(new ChatTurn(role, last.text() + "\n\n" + m.content()));
+                turns.add(new ChatTurn(role, last.text() + "\n\n" + text));
             } else {
-                turns.add(new ChatTurn(role, m.content()));
+                turns.add(new ChatTurn(role, text));
             }
         }
         return turns;
@@ -204,6 +268,7 @@ public class AgentChatService {
     private AgentMessage map(ResultSet rs, int row) throws SQLException {
         return new AgentMessage(rs.getString("id"), rs.getString("agent_id"), rs.getString("author_kind"),
                 rs.getString("author_id"), rs.getString("content"), rs.getString("status"), rs.getString("error"),
-                rs.getTimestamp("created_at").toInstant());
+                rs.getTimestamp("created_at").toInstant(),
+                rs.getString("actions") == null ? null : json.readValue(rs.getString("actions"), OUTCOMES));
     }
 }

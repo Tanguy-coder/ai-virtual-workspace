@@ -25,6 +25,8 @@ export interface Agent {
 export interface AgentMessage {
   id: string; agentId: string; authorKind: "HUMAN" | "AGENT"; authorId: string; content: string;
   status: "PENDING" | "ANSWERED" | "FAILED" | "FINAL"; error: string | null; createdAt: string;
+  /** Lead replies: outcome of each order it gave, recorded by the platform. */
+  actions?: { action: string; ok: boolean; detail: string }[] | null;
 }
 export type ProviderKind = "ANTHROPIC" | "OPENAI_COMPATIBLE";
 export interface Provider {
@@ -48,7 +50,11 @@ export interface Spend {
   todayUsd: number; totalUsd: number; callsToday: number; callsTotal: number; unpricedCalls: number;
   inputTokens: number; outputTokens: number;
 }
-export interface BudgetView { dailyLimitUsd: number | null; totalLimitUsd: number | null; spend: Spend }
+export interface BudgetView {
+  dailyLimitUsd: number | null; totalLimitUsd: number | null;
+  /** Tokens per task run set by the project (null: the platform default below). */
+  taskTokenBudget: number | null; defaultTaskTokenBudget: number; spend: Spend;
+}
 export interface EventRecord {
   id: string; seq: number; type: string; occurredAt: string; workspaceId: string; projectId: string | null;
   actor: { kind: "HUMAN" | "AGENT" | "SYSTEM"; id: string | null };
@@ -111,9 +117,11 @@ export interface ActionItem { title: string; ownerAgentId: string | null; due: s
 export interface Minutes {
   summary: string; decisions: { title: string; detail: string }[];
   disagreements: { topic: string; positions: string }[]; actionItems: ActionItem[];
+  /** Realignment meetings only: problems exposed and the solutions agreed (delivered: it reached the task's work). */
+  problems?: { raisedByAgentId: string | null; taskNumber: number | null; problem: string; solution: string | null; delivered: boolean }[];
 }
 export interface Meeting {
-  id: string; projectId: string; purpose: "KICKOFF" | "ADHOC"; title: string; agenda: string; organizerId: string;
+  id: string; projectId: string; purpose: "KICKOFF" | "ADHOC" | "REALIGNMENT"; title: string; agenda: string; organizerId: string;
   participantIds: string[];
   convenedByKind: string; status: "IN_PROGRESS" | "SYNTHESIZING" | "ENDED" | "FAILED" | "CANCELLED";
   rounds: number; currentRound: number; turnIndex: number; threadId: string; minutes: Minutes | null;

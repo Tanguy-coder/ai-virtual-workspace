@@ -7,11 +7,18 @@ Design documents live in `docs/` (discovery, architecture, UX/UI, increment repo
 
 Java 21, Maven 3.8+, Node 20.19+, Docker.
 
-## Run locally
+## Run with Docker Compose
+
+```bash
+./scripts/init-env.sh                       # creates .env with random DB password and master key (once)
+docker compose --env-file .env up --build   # starts postgres, redis, backend (:8090), and frontend (:5180)
+```
+
+## Run locally (development)
 
 ```bash
 ./scripts/init-env.sh                      # creates .env with random DB password and master key (once)
-docker compose --env-file .env up -d       # PostgreSQL 16 (pgvector) on :55432, Redis 7 on :56379
+docker compose --env-file .env up -d postgres redis   # PostgreSQL 16 (pgvector) on :55432, Redis 7 on :56379
 
 # backend (port 8090)
 cd backend && mvn -q package -DskipTests

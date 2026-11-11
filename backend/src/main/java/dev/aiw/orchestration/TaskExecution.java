@@ -5,6 +5,7 @@ import dev.aiw.agentruntime.AgentJobs;
 import dev.aiw.agentruntime.AgentRunner;
 import dev.aiw.agentruntime.JobHandler;
 import dev.aiw.collaboration.CollaborationService;
+import dev.aiw.collaboration.MeetingService;
 import dev.aiw.events.EventPublisher;
 import dev.aiw.events.Subject;
 import dev.aiw.execution.SandboxService;
@@ -12,6 +13,7 @@ import dev.aiw.governance.ApprovalDecided;
 import dev.aiw.governance.ApprovalService;
 import dev.aiw.governance.AuditLog;
 import dev.aiw.memory.MemoryService;
+import dev.aiw.modelgateway.BudgetService;
 import dev.aiw.organization.Agent;
 import dev.aiw.organization.AgentService;
 import dev.aiw.projects.Project;
@@ -82,11 +84,14 @@ public class TaskExecution {
     private final boolean autoStart;
     private final int maxSegmentSteps;
     private final long tokenBudget;
+    private final BudgetService budgets;
+    private final MeetingService meetings;
 
     TaskExecution(TaskService tasks, TaskRuns runs, AgentTools tools, AgentRunner runner, AgentJobs jobs, AgentService agents,
                   CollaborationService collaboration, MemoryService memory, GitService git, SandboxService sandboxes,
                   TestRunService tests, MergeRequestService mrs, ApprovalService approvals, ProjectService projects,
                   EventPublisher events, AuditLog audit, TransactionTemplate tx, JdbcClient jdbc, JsonMapper json,
+                  BudgetService budgets, MeetingService meetings,
                   @Value("${aiw.execution.auto-start:true}") boolean autoStart,
                   @Value("${aiw.execution.max-steps-per-segment:40}") int maxSegmentSteps,
                   @Value("${aiw.execution.token-budget:200000}") long tokenBudget) {
@@ -112,6 +117,14 @@ public class TaskExecution {
         this.autoStart = autoStart;
         this.maxSegmentSteps = maxSegmentSteps;
         this.tokenBudget = tokenBudget;
+        this.budgets = budgets;
+        this.meetings = meetings;
+    }
+
+    /** Tokens given to each new run of the project: the project's setting, else the platform default. */
+    public long taskTokenBudget(String projectId) {
+        Long own = budgets.get(projectId).taskTokenBudget();
+        return own == null ? tokenBudget : own;
     }
 
     // ================================================================== start
@@ -125,6 +138,8 @@ public class TaskExecution {
                 WHERE t.status = 'ASSIGNED' AND a.status = 'ACTIVE' AND a.provider_id IS NOT NULL AND a.model IS NOT NULL
                   AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.task_id = t.id AND r.status IN ('RUNNING', 'PAUSED', 'SUBMITTED', 'BLOCKED'))
                   AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.agent_id = a.id AND r.status IN ('RUNNING', 'PAUSED'))
+                  AND NOT EXISTS (SELECT 1 FROM meeting_participants p JOIN meetings m ON m.id = p.meeting_id
+                                  WHERE p.agent_id = a.id AND m.status IN ('IN_PROGRESS', 'SYNTHESIZING'))
                 ORDER BY t.assignee_id, CASE t.priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END, t.number
                 """).query(String.class).list();
         for (String taskId : candidates) {
@@ -149,14 +164,19 @@ public class TaskExecution {
         Project project = projects.find(task.projectId()).orElseThrow();
         String ws = tasks.workspaceOf(task);
         Path repo = git.ensureRepo(ws, project.id(), project.name(), project.description());
-        String branch = "agent/" + slug(agent.name(), 30) + "/t-" + task.number() + "-" + slug(task.title(), 32);
+        // A task split from a bigger one may continue the work already committed on the original branch.
+        String base = jdbc.sql("SELECT base_branch FROM tasks WHERE id = ?").param(taskId).query(String.class).optional().orElse(null);
+        String branch = base != null && git.hasBranch(repo, base) ? base
+                : "agent/" + slug(agent.name(), 30) + "/t-" + task.number() + "-" + slug(task.title(), 32);
+        long budget = taskTokenBudget(project.id());
         Path worktree = git.worktree(repo, project.id(), branch);
         String image = SandboxService.imageFor(worktree);
         return tx.execute(s -> {
-            TaskRun run = runs.create(ws, project.id(), taskId, agent.id(), branch, worktree.toString(), image, tokenBudget);
+            TaskRun run = runs.create(ws, project.id(), taskId, agent.id(), branch, worktree.toString(), image, budget);
             tasks.advance(taskId, "IN_PROGRESS", actor, Map.of("runId", run.id(), "branch", branch));
             agents.setResting(agent.id(), "WORKING", null);
-            runs.step(run, "PLATFORM", null, "Branch " + branch + " created from main · sandbox " + image,
+            runs.step(run, "PLATFORM", null, (branch.equals(base) ? "Continues branch " + branch : "Branch " + branch + " created from main")
+                            + " · sandbox " + image + " · budget " + budget + " tokens",
                     Map.of("branch", branch, "image", image), "OK", 0, 0, 0);
             events.publish(ws, project.id(), "task_run.started", actor, new Subject("task_run", run.id()),
                     Map.of("taskId", taskId, "agentId", agent.id(), "branch", branch, "number", task.number()));
@@ -174,9 +194,11 @@ public class TaskExecution {
         Agent agent = runner.agent(job);
         if (run.pauseRequested()) {
             tx.executeWithoutResult(s -> {
+                String meeting = pausedForMeeting(run.id());
                 runs.status(run, "PAUSED", null);
-                runs.step(run, "PLATFORM", null, "Paused by the CTO", Map.of(), "OK", 0, 0, 0);
-                agents.setResting(agent.id(), "AVAILABLE", null);
+                runs.step(run, "PLATFORM", null, meeting != null ? "Paused for a realignment meeting" : "Paused by the CTO",
+                        Map.of(), "OK", 0, 0, 0);
+                agents.setResting(agent.id(), meetings.inOpenMeeting(agent.id()) ? "IN_MEETING" : "AVAILABLE", null);
             });
             return;
         }
@@ -336,7 +358,12 @@ public class TaskExecution {
             sb.append("</new>\n");
         }
         sb.append("Step ").append(run.steps() + 1).append(" · tokens used ").append(run.tokens()).append(" of ")
-                .append(run.tokenBudget()).append(". Decide your next actions.");
+                .append(run.tokenBudget()).append(".");
+        if (run.tokens() * 10 >= run.tokenBudget() * 8) {
+            sb.append(" Your budget is nearly spent: commit what works and task.submit if the criteria are proven; otherwise "
+                    + "task.block and say precisely what remains, so the Lead can split it into smaller tasks.");
+        }
+        sb.append(" Decide your next actions.");
         return sb.toString();
     }
 
@@ -412,7 +439,11 @@ public class TaskExecution {
         TaskRun run = runs.openForTask(taskId).filter(r -> Set.of("PAUSED", "BLOCKED").contains(r.status()))
                 .orElseThrow(() -> ApiException.conflict("not_paused", "No paused or blocked work on this task"));
         Task task = tasks.find(taskId).orElseThrow();
-        if (runs.agentBusy(run.agentId())) throw ApiException.conflict("agent_busy", "The agent is working on another task");
+        if (runs.agentBusyElsewhere(run.agentId(), run.id())) throw ApiException.conflict("agent_busy", "The agent is working on another task");
+        if (budgetExhausted(run)) {
+            throw ApiException.conflict("budget_exhausted", "The token budget of this task is spent (" + run.tokens() + " of "
+                    + run.tokenBudget() + "): raise it or ask the Lead to split the task");
+        }
         tx.executeWithoutResult(s -> {
             if ("BLOCKED".equals(task.status())) tasks.unblock(taskId, actor);
             tasks.advance(taskId, "IN_PROGRESS", actor, Map.of("runId", run.id()));
@@ -422,6 +453,120 @@ public class TaskExecution {
             jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
         });
         return runs.find(run.id()).orElseThrow();
+    }
+
+    static boolean budgetExhausted(TaskRun run) {
+        return run.tokens() >= run.tokenBudget();
+    }
+
+    /**
+     * The CTO changes the token budget of the task's open run. A run stopped because its budget was spent resumes
+     * at once when the new budget leaves room.
+     */
+    public TaskRun setBudget(String taskId, String userId, long budget) {
+        TaskRun run = runs.openForTask(taskId).orElseThrow(() -> ApiException.conflict("no_run", "No open work on this task"));
+        if (budget <= run.tokens()) {
+            throw ApiException.badRequest("budget_too_low", "This task has already used " + run.tokens() + " tokens: give more than that");
+        }
+        boolean stoppedByBudget = "BLOCKED".equals(run.status()) && budgetExhausted(run);
+        Actor actor = Actor.human(userId);
+        tx.executeWithoutResult(s -> {
+            runs.budget(run, budget, actor);
+            runs.step(run, "PLATFORM", null, "Token budget changed by the CTO: " + run.tokenBudget() + " → " + budget,
+                    Map.of(), "OK", 0, 0, 0);
+            audit.record(runs.workspaceOf(run), actor, "task_run.budget", "task_run", run.id(), AuditLog.Decision.RECORDED,
+                    Map.of("from", String.valueOf(run.tokenBudget()), "to", String.valueOf(budget)));
+        });
+        if (stoppedByBudget && !runs.agentBusyElsewhere(run.agentId(), run.id())) return resume(taskId, actor);
+        return runs.find(run.id()).orElseThrow();
+    }
+
+    // ================================================================== realignment meetings
+
+    private String pausedForMeeting(String runId) {
+        return jdbc.sql("SELECT paused_for_meeting FROM task_runs WHERE id = ?").param(runId).query(String.class).optional().orElse(null);
+    }
+
+    /** Pauses the agent's running work for the meeting (at its next step); work already paused stays as it is. */
+    void pauseForMeeting(String agentId, String meetingId) {
+        runs.openForAgent(agentId).stream().filter(r -> "RUNNING".equals(r.status())).forEach(r -> {
+            runs.requestPause(r.id(), true);
+            runs.pausedForMeeting(r.id(), meetingId);
+        });
+    }
+
+    /**
+     * When the meeting is over, the work it paused resumes, with what the meeting decided as a new item. Runs that
+     * had not reached their pause point yet simply go on. Never throws: it runs in the meeting's transaction.
+     */
+    int resumeAfterMeeting(String meetingId, String note) {
+        int resumed = 0;
+        for (TaskRun run : runs.pausedFor(meetingId)) {
+            runs.pausedForMeeting(run.id(), null);
+            if (note != null && !note.isBlank()) {
+                runs.step(run, "MESSAGE", null, "Outcome of the realignment meeting", Map.of("text", note), "OK", 0, 0, 0);
+            }
+            if ("RUNNING".equals(run.status())) {
+                runs.requestPause(run.id(), false);
+            } else if ("PAUSED".equals(run.status()) && !runs.agentBusyElsewhere(run.agentId(), run.id())) {
+                Task task = tasks.find(run.taskId()).orElseThrow();
+                if (TaskService.CLOSED.contains(task.status())) continue;
+                tasks.advance(task.id(), "IN_PROGRESS", Actor.system(), Map.of("runId", run.id()));
+                runs.status(run, "RUNNING", null);
+                runs.step(run, "PLATFORM", null, "Resumed after the meeting", Map.of(), "OK", 0, 0, 0);
+                agents.setResting(run.agentId(), "WORKING", null);
+                jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+                resumed++;
+            }
+        }
+        return resumed;
+    }
+
+    /**
+     * A solution agreed in a meeting reaches the task's open run as a message; a run the agent had blocked resumes with it
+     * (not one stopped by its budget: that needs the CTO). Returns null (no open run), "posted" or "resumed". Never throws.
+     */
+    String deliverSolution(String taskId, String text) {
+        Optional<TaskRun> open = runs.openForTask(taskId);
+        if (open.isEmpty()) return null;
+        TaskRun run = open.get();
+        runs.step(run, "MESSAGE", null, "Solution agreed in the realignment meeting", Map.of("text", text), "OK", 0, 0, 0);
+        if (!"BLOCKED".equals(run.status()) || budgetExhausted(run) || runs.agentBusyElsewhere(run.agentId(), run.id())) {
+            return "posted";
+        }
+        Task task = tasks.find(taskId).orElseThrow();
+        if ("BLOCKED".equals(task.status())) tasks.unblock(taskId, Actor.system());
+        tasks.advance(taskId, "IN_PROGRESS", Actor.system(), Map.of("runId", run.id()));
+        runs.status(run, "RUNNING", null);
+        runs.step(run, "PLATFORM", null, "Resumed with the solution from the meeting", Map.of(), "OK", 0, 0, 0);
+        agents.setResting(run.agentId(), "WORKING", null);
+        jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+        return "resumed";
+    }
+
+    /** Agents whose work stays blocked after a meeting show as blocked again (the meeting showed them in it). */
+    void restoreBlocked(List<String> agentIds) {
+        for (String agentId : agentIds) {
+            runs.openForAgent(agentId).stream().filter(r -> "BLOCKED".equals(r.status())).findFirst()
+                    .ifPresent(r -> agents.setResting(agentId, "BLOCKED", r.blockedReason()));
+        }
+    }
+
+    /** What the agent is working on, for a realignment meeting turn (a few lines, built by code). */
+    String workStatus(String agentId) {
+        List<TaskRun> open = runs.openForAgent(agentId);
+        StringBuilder sb = new StringBuilder();
+        for (TaskRun run : open) {
+            Task task = tasks.find(run.taskId()).orElse(null);
+            if (task == null) continue;
+            sb.append("- T-").append(task.number()).append(" \"").append(task.title()).append("\": ").append(run.status().toLowerCase());
+            if (run.blockedReason() != null) sb.append(" — ").append(AgentTools.clip(run.blockedReason(), 400));
+            sb.append(" · ").append(run.steps()).append(" steps, ").append(run.tokens()).append(" of ").append(run.tokenBudget()).append(" tokens");
+            runs.steps(run.id()).stream().filter(st -> "MODEL".equals(st.kind())).reduce((a, b) -> b)
+                    .ifPresent(st -> sb.append("\n  last thought: ").append(AgentTools.clip(st.summary(), 300)));
+            sb.append("\n");
+        }
+        return sb.toString();
     }
 
     public boolean hasBlockedRun(String taskId) {
@@ -447,6 +592,16 @@ public class TaskExecution {
                 if (!runs.agentBusy(run.agentId())) agents.setResting(run.agentId(), "AVAILABLE", null);
             });
         });
+    }
+
+    /** Ends a run inside the caller's transaction (its task was split); the sandbox is stopped by {@link #stopSandbox}. */
+    void cancelRun(TaskRun run) {
+        runs.status(run, "CANCELLED", null);
+        if (!runs.agentBusy(run.agentId())) agents.setResting(run.agentId(), "AVAILABLE", null);
+    }
+
+    void stopSandbox(TaskRun run) {
+        sandboxes.stop(run.sandboxId());
     }
 
     void failed(AgentJob job, String error) {

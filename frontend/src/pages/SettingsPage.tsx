@@ -166,7 +166,8 @@ function Budgets({ workspaceId }: { workspaceId: string }) {
   return (
     <Card title="Project budgets">
       <p className="mb-3 text-[13px] text-muted">
-        Calls are refused once a limit is reached. An event is recorded at 80% and 100%. Days are UTC.
+        Calls are refused once a limit is reached. An event is recorded at 80% and 100%. Days are UTC. Tokens per task is
+        what each new task run may spend; the Lead sizes its tasks to fit it, so a small model can carry a big project.
       </p>
       {projects.data?.length === 0 && <p className="text-[13px] text-muted">No project yet.</p>}
       <div className="space-y-2">{projects.data?.map((p) => <BudgetRow key={p.id} project={p} />)}</div>
@@ -179,24 +180,27 @@ function BudgetRow({ project }: { project: Project }) {
   const budget = useQuery({ queryKey: ["budget", project.id], queryFn: () => api.get<BudgetView>(`/api/v1/projects/${project.id}/budget`) });
   const [daily, setDaily] = useState<string | null>(null);
   const [total, setTotal] = useState<string | null>(null);
+  const [perTask, setPerTask] = useState<string | null>(null);
   const save = useMutation({
     mutationFn: () => api.put(`/api/v1/projects/${project.id}/budget`, {
       dailyLimitUsd: (daily ?? String(budget.data?.dailyLimitUsd ?? "")) || null,
       totalLimitUsd: (total ?? String(budget.data?.totalLimitUsd ?? "")) || null,
+      taskTokenBudget: Number((perTask ?? String(budget.data?.taskTokenBudget ?? "")).replace(/\D/g, "")) || null,
     }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["budget", project.id] }),
   });
   const b = budget.data;
   return (
-    <div className="grid items-end gap-2 rounded-md border border-line p-3 sm:grid-cols-[1fr_120px_120px_auto]">
+    <div className="grid items-end gap-2 rounded-md border border-line p-3 sm:grid-cols-[1fr_110px_110px_150px_auto]">
       <div>
         <p className="font-medium">{project.name}</p>
         {b && <p className="text-[12px] text-muted">today {usd(b.spend.todayUsd)} · total {usd(b.spend.totalUsd)}</p>}
       </div>
       <Field label="Daily $"><Input inputMode="decimal" value={daily ?? String(b?.dailyLimitUsd ?? "")} onChange={(e) => setDaily(e.target.value)} placeholder="none" /></Field>
       <Field label="Total $"><Input inputMode="decimal" value={total ?? String(b?.totalLimitUsd ?? "")} onChange={(e) => setTotal(e.target.value)} placeholder="none" /></Field>
+      <Field label="Tokens per task"><Input inputMode="numeric" value={perTask ?? String(b?.taskTokenBudget ?? "")} onChange={(e) => setPerTask(e.target.value)} placeholder={b?.defaultTaskTokenBudget ? `${b.defaultTaskTokenBudget} (default)` : "default"} /></Field>
       <Button variant="ghost" onClick={() => save.mutate()} disabled={save.isPending}>Save</Button>
-      <div className="sm:col-span-4"><ErrorText error={save.error} /></div>
+      <div className="sm:col-span-5"><ErrorText error={save.error} /></div>
     </div>
   );
 }
