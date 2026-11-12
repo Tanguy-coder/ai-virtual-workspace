@@ -44,6 +44,10 @@ public class TestApi {
         return send(withCsrf(json(HttpRequest.newBuilder(URI.create(base + path)), body).method("PUT", publisher(body))));
     }
 
+    public Response delete(String path) {
+        return send(withCsrf(HttpRequest.newBuilder(URI.create(base + path))).DELETE());
+    }
+
     public Response postWithoutCsrf(String path, Object body) {
         return send(json(HttpRequest.newBuilder(URI.create(base + path)), body).method("POST", publisher(body)));
     }

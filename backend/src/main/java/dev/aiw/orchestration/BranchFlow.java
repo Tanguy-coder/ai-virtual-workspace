@@ -4,6 +4,8 @@ import dev.aiw.events.EventPublisher;
 import dev.aiw.events.Subject;
 import dev.aiw.governance.ApprovalDecided;
 import dev.aiw.governance.ApprovalService;
+import dev.aiw.governance.AuditLog;
+import dev.aiw.shared.ApiException;
 import dev.aiw.organization.Agent;
 import dev.aiw.organization.AgentService;
 import dev.aiw.scm.GitService;
@@ -37,9 +39,11 @@ public class BranchFlow {
     private final TaskService tasks;
     private final JdbcClient jdbc;
     private final TransactionTemplate tx;
+    private final AuditLog audit;
 
     BranchFlow(GitService git, ApprovalService approvals, EventPublisher events, AgentService agents, TaskService tasks,
-               JdbcClient jdbc, TransactionTemplate tx) {
+               JdbcClient jdbc, TransactionTemplate tx, AuditLog audit) {
+        this.audit = audit;
         this.git = git;
         this.approvals = approvals;
         this.events = events;
@@ -136,6 +140,73 @@ public class BranchFlow {
             payload.put("reason", AgentTools.clip(ex.getMessage() == null ? "unknown error" : ex.getMessage(), 500));
             events.publish(e.workspaceId(), e.projectId(), "branch.merge_failed", Actor.system(), new Subject("project", e.projectId()), payload);
         }
+    }
+
+    /** Runs whose work is not over: their branch must stay. */
+    private static final String OPEN_RUN = "('RUNNING', 'PAUSED', 'SUBMITTED', 'BLOCKED')";
+
+    /**
+     * A task branch merged into develop (or main) has nothing left to give: the merge commit keeps its history. It is
+     * deleted with its worktree, unless an open task still works on it (a split task continues on its parent's branch).
+     */
+    public boolean deleteMergedTaskBranch(String workspaceId, String projectId, String branch, String into, int mrNumber) {
+        Path repo = git.repo(projectId).orElse(null);
+        if (repo == null || !git.hasBranch(repo, branch) || !git.mergedInto(repo, branch, into) || stillUsed(projectId, branch)) return false;
+        if (!git.deleteBranch(repo, branch)) return false;
+        tx.executeWithoutResult(s -> events.publish(workspaceId, projectId, "branch.deleted", Actor.system(),
+                new Subject("project", projectId), Map.of("branch", branch, "mergedInto", into, "mr", mrNumber)));
+        return true;
+    }
+
+    /** Merged task branches left from before branches were deleted on merge. */
+    void deleteLeftoverMergedBranches() {
+        record Merged(String ws, String project, String branch, String into, int number) {}
+        jdbc.sql("""
+                SELECT workspace_id, project_id, source_branch, target_branch, number FROM merge_requests m WHERE status = 'MERGED'
+                  AND NOT EXISTS (SELECT 1 FROM merge_requests o WHERE o.source_branch = m.source_branch
+                                  AND o.project_id = m.project_id AND o.status NOT IN ('MERGED', 'CLOSED'))
+                """).query((rs, i) -> new Merged(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getInt(5)))
+                .list().forEach(m -> {
+                    try {
+                        deleteMergedTaskBranch(m.ws(), m.project(), m.branch(), m.into(), m.number());
+                    } catch (RuntimeException e) {
+                        log.warn("Could not delete merged branch {} of project {}", m.branch(), m.project(), e);
+                    }
+                });
+    }
+
+    /**
+     * The CTO deletes a branch from the Branches page: the click is the explicit approval (audited). Refused for main,
+     * develop and any branch an open task still works on. An unmerged branch loses its commits.
+     */
+    public Map<String, Object> deleteBranch(String workspaceId, String projectId, String branch, String userId) {
+        if (GitService.MAIN.equals(branch) || GitService.DEVELOP.equals(branch)) {
+            throw ApiException.conflict("protected_branch", branch + " is never deleted");
+        }
+        Path repo = git.repo(projectId).filter(r -> git.hasBranch(r, branch))
+                .orElseThrow(() -> ApiException.notFound("Branch"));
+        if (stillUsed(projectId, branch)) {
+            throw ApiException.conflict("branch_in_use", "An open task still works on " + branch + ": cancel it or let it finish first");
+        }
+        boolean merged = git.mergedInto(repo, branch, git.integrationBranch(repo)) || git.mergedInto(repo, branch, GitService.MAIN);
+        String head = git.revParse(repo, branch);
+        if (!git.deleteBranch(repo, branch)) throw ApiException.conflict("delete_failed", "Git could not delete " + branch);
+        Map<String, Object> details = Map.of("branch", branch, "head", head, "merged", merged);
+        tx.executeWithoutResult(s -> {
+            jdbc.sql("UPDATE merge_requests SET status = 'CLOSED', updated_at = now() WHERE project_id = ? AND source_branch = ? AND status NOT IN ('MERGED', 'CLOSED')")
+                    .params(projectId, branch).update();
+            audit.record(workspaceId, Actor.human(userId), "branch.delete", "project", projectId, AuditLog.Decision.APPROVED, details);
+            events.publish(workspaceId, projectId, "branch.deleted", Actor.human(userId), new Subject("project", projectId), details);
+        });
+        return details;
+    }
+
+    private boolean stillUsed(String projectId, String branch) {
+        return jdbc.sql("SELECT count(*) FROM task_runs WHERE project_id = ? AND branch = ? AND status IN " + OPEN_RUN)
+                .params(projectId, branch).query(Long.class).single() > 0
+                || jdbc.sql("""
+                        SELECT count(*) FROM tasks WHERE project_id = ? AND base_branch = ? AND status NOT IN ('DONE', 'CANCELLED')
+                        """).params(projectId, branch).query(Long.class).single() > 0;
     }
 
     private Actor leadActor(String projectId) {

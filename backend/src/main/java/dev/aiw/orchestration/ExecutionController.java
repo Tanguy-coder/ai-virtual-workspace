@@ -35,10 +35,12 @@ class ExecutionController {
     private final MergeRequestService mrs;
     private final GitService git;
     private final TestRunService tests;
+    private final BranchFlow branchFlow;
 
     ExecutionController(WorkspaceAccess access, TaskService tasks, TaskRuns runs, TaskExecution execution,
-                        MergeRequestService mrs, GitService git, TestRunService tests) {
+                        MergeRequestService mrs, GitService git, TestRunService tests, BranchFlow branchFlow) {
         this.access = access;
+        this.branchFlow = branchFlow;
         this.tasks = tasks;
         this.runs = runs;
         this.execution = execution;
@@ -116,7 +118,7 @@ class ExecutionController {
         String head = "MERGED".equals(mr.status()) && mr.mergedCommit() != null ? mr.mergedCommit() : mr.sourceBranch();
         List<GitService.FileChange> files = "MERGED".equals(mr.status()) && mr.mergedCommit() != null
                 ? git.changes(repo, mr.mergedCommit() + "^1", mr.mergedCommit())
-                : git.changes(repo, mr.targetBranch(), head);
+                : git.hasBranch(repo, mr.sourceBranch()) ? git.changes(repo, mr.targetBranch(), head) : List.of();
         List<TestRun> runsOfTask = tests.list(mr.projectId(), mr.taskId(), 20);
         return new MergeRequestView(mr, mrs.comments(mrId), files, runsOfTask);
     }
@@ -127,7 +129,7 @@ class ExecutionController {
         Path repo = git.repo(mr.projectId()).orElseThrow();
         String diff = "MERGED".equals(mr.status()) && mr.mergedCommit() != null
                 ? git.diff(repo, mr.mergedCommit() + "^1", mr.mergedCommit(), path)
-                : git.diff(repo, mr.targetBranch(), mr.sourceBranch(), path);
+                : git.hasBranch(repo, mr.sourceBranch()) ? git.diff(repo, mr.targetBranch(), mr.sourceBranch(), path) : "";
         return Map.of("diff", diff.length() > 400_000 ? diff.substring(0, 400_000) : diff);
     }
 
@@ -150,6 +152,13 @@ class ExecutionController {
     List<GitService.Branch> branches(@PathVariable String projectId) {
         access.requireProject(projectId, WorkspaceRole.VIEWER);
         return git.repo(projectId).map(git::branches).orElse(List.of());
+    }
+
+    /** The CTO deletes a branch: the click is the explicit approval, audited (main and develop never). */
+    @org.springframework.web.bind.annotation.DeleteMapping("/api/v1/projects/{projectId}/repo/branches")
+    Map<String, Object> deleteBranch(@PathVariable String projectId, @RequestParam String name) {
+        String user = member(projectId);
+        return branchFlow.deleteBranch(access.workspaceOfProject(projectId), projectId, name, user);
     }
 
     @GetMapping("/api/v1/projects/{projectId}/repo/log")

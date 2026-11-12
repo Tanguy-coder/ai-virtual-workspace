@@ -23,6 +23,9 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
     case "branch.created": return `${actor} created the ${p.branch} branch from ${p.from}`;
     case "branch.merged": return `develop merged into main with the CTO's approval (${String(p.commit).slice(0, 7)})`;
     case "branch.merge_failed": return `The merge of develop into main failed: ${p.reason}`;
+    case "branch.deleted": return p.mergedInto
+      ? `Branch ${p.branch} deleted after its merge into ${p.mergedInto} (!${p.mr})`
+      : `${actor} deleted the branch ${p.branch}${p.merged ? "" : " (not merged: its commits are gone)"}`;
     case "agent.step_completed": return `${agent} · ${p.summary} (${String(p.outcome).toLowerCase()}, ${Math.round(Number(p.durationMs) / 100) / 10}s)`;
     case "job.queued": return `Queued ${job[String(p.type)] ?? p.type} for ${who(p.agentId)}`;
     case "job.completed": return `${who(p.agentId)} finished the ${job[String(p.type)] ?? p.type}`;

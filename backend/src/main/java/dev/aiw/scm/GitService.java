@@ -117,6 +117,27 @@ public class GitService {
         run(repo, "worktree", "remove", "--force", worktree.toString());
     }
 
+    /** Is every commit of {@code branch} already in {@code into}? */
+    public boolean mergedInto(Path repo, String branch, String into) {
+        return run(repo, "merge-base", "--is-ancestor", branch, into).ok();
+    }
+
+    /**
+     * Deletes a branch (main and develop never), first removing any worktree that has it checked out. The caller
+     * decides whether unmerged commits may go: a task branch already merged, or the CTO's explicit choice.
+     */
+    public boolean deleteBranch(Path repo, String branch) {
+        if (MAIN.equals(branch) || DEVELOP.equals(branch) || !hasBranch(repo, branch)) return false;
+        String list = git(repo, "worktree", "list", "--porcelain");
+        String path = null;
+        for (String l : list.split("\n")) {
+            if (l.startsWith("worktree ")) path = l.substring("worktree ".length());
+            else if (l.equals("branch refs/heads/" + branch) && path != null) run(repo, "worktree", "remove", "--force", path);
+        }
+        run(repo, "worktree", "prune");
+        return run(repo, "branch", "-D", branch).ok();
+    }
+
     /** Commits every change in the worktree; returns the new commit, or empty when there was nothing to commit. */
     public Optional<String> commitAll(Path worktree, String message, Author author) {
         git(worktree, "add", "-A");

@@ -1,5 +1,8 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, useParams } from "react-router";
-import { Badge, Card, Empty, PageHeader, SkeletonRows, Table } from "../../components/ui";
+import { api } from "../../api/client";
+import { Badge, Button, Card, Empty, ErrorText, PageHeader, SkeletonRows, Table } from "../../components/ui";
 import { MR_LABEL, MR_TONE, useBranches, useLog, useMergeRequests } from "../../lib/engineering";
 import { relative } from "../../lib/format";
 
@@ -10,23 +13,46 @@ export function BranchesPage() {
   const log = useLog(projectId);
   const mrs = useMergeRequests(projectId);
   const mrOf = (name: string) => mrs.data?.find((m) => m.sourceBranch === name);
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const remove = useMutation({
+    mutationFn: (name: string) => api.del(`/api/v1/projects/${projectId}/repo/branches?name=${encodeURIComponent(name)}`),
+    onSuccess: () => {
+      setConfirming(null);
+      queryClient.invalidateQueries({ queryKey: ["branches", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["merge-requests", projectId] });
+    },
+  });
+  const protectedBranch = (name: string) => name === "main" || name === "develop";
   return (
     <div>
-      <PageHeader title="Branches" subtitle="One branch per task, never a shared one. Conflicts are detected before any merge." />
+      <PageHeader title="Branches" subtitle="One branch per task, deleted once merged. Conflicts are detected before any merge." />
+      <ErrorText error={remove.error} />
       {branches.isLoading && <SkeletonRows />}
       {branches.data?.length === 0 && <Empty title="No repository yet">It is created when the first task starts.</Empty>}
       {!!branches.data?.length && (
-        <Table head={["Branch", "Ahead", "Behind main", "Last commit", "Merge request", "Updated"]}>
+        <Table head={["Branch", "Ahead", "Behind main", "Last commit", "Merge request", "Updated", ""]}>
           {branches.data.map((b) => {
             const mr = mrOf(b.name);
             return (
               <tr key={b.name}>
-                <td><Link to={`/w/${workspaceId}/p/${projectId}/code?ref=${encodeURIComponent(b.name)}`} className="font-mono text-[12px] hover:underline">{b.name}</Link>{b.name === "main" && <Badge className="ml-2">protected</Badge>}</td>
+                <td><Link to={`/w/${workspaceId}/p/${projectId}/code?ref=${encodeURIComponent(b.name)}`} className="font-mono text-[12px] hover:underline">{b.name}</Link>{protectedBranch(b.name) && <Badge className="ml-2">protected</Badge>}</td>
                 <td className="tabular">{b.name === "main" ? "" : b.ahead}</td>
                 <td className="tabular">{b.name === "main" ? "" : b.behind}</td>
                 <td className="max-w-xs truncate text-muted"><span className="mr-1.5 font-mono text-[12px] text-faint">{b.head}</span>{b.lastSubject}</td>
                 <td>{mr && <Link to={`/w/${workspaceId}/p/${projectId}/merge-requests/${mr.id}`}><Badge tone={MR_TONE[mr.status]} dot>!{mr.number} {MR_LABEL[mr.status]}</Badge></Link>}</td>
                 <td className="text-muted">{relative(b.lastDate)}</td>
+                <td className="whitespace-nowrap text-right">
+                  {!protectedBranch(b.name) && (confirming === b.name ? (
+                    <span className="inline-flex items-center gap-2 text-[12px]">
+                      <span className="text-muted">{mr?.status === "MERGED" ? "Delete?" : "Not merged: its commits are lost. Delete?"}</span>
+                      <Button size="sm" variant="danger" disabled={remove.isPending} onClick={() => remove.mutate(b.name)}>Delete</Button>
+                      <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>Keep</Button>
+                    </span>
+                  ) : (
+                    <Button size="sm" variant="subtle" onClick={() => { remove.reset(); setConfirming(b.name); }}>Delete</Button>
+                  ))}
+                </td>
               </tr>
             );
           })}

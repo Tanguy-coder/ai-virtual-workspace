@@ -99,3 +99,19 @@ Constaté sur « To do list » : la relecture de T-17 par le Lead (Groq, 8000 to
   - Une tâche déjà bloquée sur une revue refusée (MR `CHANGES_REQUESTED`, travail `BLOCKED` ou `PAUSED`) peut aussi être jugée depuis la page de la MR, si la branche n'a pas bougé depuis la dernière soumission.
   - Test : `ExecutionIntegrationTest.aReviewDisagreementGoesToTheCto`.
 - **Correction de JSON** : seuls les 2000 premiers caractères de la réponse fautive sont renvoyés au modèle.
+
+## Suppression des branches de tâche (2026-11-12)
+
+Une branche par tâche : sans ménage, elles s'accumulent (16 sur « To do list »). Exception validée par le CTO à la règle « supprimer une branche demande une approbation humaine » :
+
+- **Après le merge** (`TaskExecution.merge` → `BranchFlow.deleteMergedTaskBranch`), la branche de tâche est supprimée avec son worktree.
+  - Elle n'est supprimée que si tous ses commits sont dans la cible (`git merge-base --is-ancestor`) et qu'aucune tâche ouverte ne la réutilise : une sous-tâche issue d'un découpage continue sur la branche de son parent.
+  - Rien n'est perdu : le merge `--no-ff` garde les commits. La MR garde le nom de la branche et son commit de merge, et ses fichiers et son diff sont lus depuis ce commit de merge.
+  - Événement `branch.deleted`.
+- **Branches mergées avant ce changement** : le nettoyage périodique (toutes les 5 minutes) les supprime de la même façon.
+- **Toute autre branche** (tâche annulée, travail abandonné) : le CTO la supprime depuis la page Branches.
+  - Bouton « Delete », avec confirmation dans la page et avertissement si la branche n'est pas mergée.
+  - Le clic vaut approbation explicite : il est audité (`branch.delete`, APPROVED, avec le commit de tête).
+  - La MR non mergée de cette branche passe à `CLOSED`.
+  - Refusé pour `main` et `develop`, et pour une branche qu'une tâche ouverte utilise encore.
+- **Test** : `ExecutionIntegrationTest` vérifie que la branche est supprimée après le merge, que la MR mergée montre encore ses fichiers et son diff, et que `main` et `develop` sont refusées (409).

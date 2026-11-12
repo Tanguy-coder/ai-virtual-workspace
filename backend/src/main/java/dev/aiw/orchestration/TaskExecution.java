@@ -1214,6 +1214,11 @@ public class TaskExecution {
             if (!runs.agentBusy(author.id())) agents.setResting(author.id(), "AVAILABLE", null);
         });
         git.removeWorktree(repo, wt);
+        try {
+            branches.deleteMergedTaskBranch(ws, mr.projectId(), run.branch(), target, mr.number());
+        } catch (RuntimeException e) {
+            log.warn("Could not delete the merged branch {}", run.branch(), e); // the merge itself is done
+        }
         if (GitService.DEVELOP.equals(target)) branches.afterTaskMerged(ws, mr.projectId());
     }
 
@@ -1239,6 +1244,7 @@ public class TaskExecution {
     /** Removes sandboxes whose run is over (or unknown), e.g. after a restart. Branches and worktrees stay. */
     @Scheduled(fixedDelayString = "${aiw.execution.cleanup-ms:300000}", initialDelayString = "${aiw.execution.cleanup-delay-ms:60000}")
     void cleanup() {
+        branches.deleteLeftoverMergedBranches();
         if (!sandboxes.enabled()) return;
         sandboxes.running().forEach((runId, containerId) -> {
             boolean keep = runs.find(runId).map(r -> Set.of("RUNNING", "PAUSED", "SUBMITTED", "BLOCKED").contains(r.status())

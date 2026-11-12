@@ -136,6 +136,13 @@ class ExecutionIntegrationTest {
 
         JsonNode run = api.get("/api/v1/tasks/" + taskId + "/run").json();
         assertThat(run.get("run").get("branch").asString()).startsWith("agent/java-engineer-01/t-1-sum-two-numbers");
+        // Merged, the task branch is deleted; the merge request still shows its changes from the merge commit.
+        String taskBranch = run.get("run").get("branch").asString();
+        assertThat(api.get("/api/v1/projects/" + p + "/repo/branches").json().toString()).doesNotContain(taskBranch).contains("develop");
+        assertThat(api.get("/api/v1/merge-requests/" + mr.get("id").asString()).json().get("files").toString()).contains("src/sum.js");
+        assertThat(api.get("/api/v1/merge-requests/" + mr.get("id").asString() + "/diff").json().get("diff").asString()).contains("a + b");
+        assertThat(api.delete("/api/v1/projects/" + p + "/repo/branches?name=develop").status()).isEqualTo(409);
+        assertThat(api.delete("/api/v1/projects/" + p + "/repo/branches?name=main").status()).isEqualTo(409);
         String steps = run.get("steps").toString();
         assertThat(steps).contains("created from develop").contains("Tests failed on submission").contains("file.edit src/sum.js")
                 .contains("Submitted: tests passed").contains("merging into develop").contains("Merged into develop");
