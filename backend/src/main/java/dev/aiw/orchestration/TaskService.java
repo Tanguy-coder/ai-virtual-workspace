@@ -223,6 +223,9 @@ public class TaskService {
         setStatus(task, "CANCELLED", actor, Map.of());
         audit.record(workspaceOf(task), actor, "task.cancel", "task", taskId, AuditLog.Decision.RECORDED,
                 Map.of("number", String.valueOf(task.number())));
+        // A cancelled task is no longer awaited: its dependents may be ready now.
+        jdbc.sql("SELECT task_id FROM task_dependencies WHERE depends_on_id = ?").param(taskId).query(String.class).list()
+                .forEach(id -> settle(id, actor));
         return find(taskId).orElseThrow();
     }
 
@@ -278,7 +281,7 @@ public class TaskService {
         if (!List.of("CREATED", "READY", "ASSIGNED").contains(task.status())) return;
         long pending = jdbc.sql("""
                 SELECT count(*) FROM task_dependencies d JOIN tasks t ON t.id = d.depends_on_id
-                WHERE d.task_id = ? AND t.status <> 'DONE'
+                WHERE d.task_id = ? AND t.status NOT IN ('DONE', 'CANCELLED')
                 """).param(taskId).query(Long.class).single();
         String target = pending > 0 ? "CREATED" : task.assigneeId() == null ? "READY" : "ASSIGNED";
         if (!target.equals(task.status())) setStatus(task, target, actor, Map.of());

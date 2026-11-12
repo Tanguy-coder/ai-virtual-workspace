@@ -14,6 +14,7 @@ import dev.aiw.governance.ApprovalService;
 import dev.aiw.governance.AuditLog;
 import dev.aiw.memory.MemoryService;
 import dev.aiw.modelgateway.BudgetService;
+import dev.aiw.modelgateway.ModelCallException;
 import dev.aiw.organization.Agent;
 import dev.aiw.organization.AgentService;
 import dev.aiw.projects.Project;
@@ -61,6 +62,8 @@ public class TaskExecution {
     private static final Logger log = LoggerFactory.getLogger(TaskExecution.class);
     static final String STEP = "TASK_STEP", REVIEW = "TASK_REVIEW", MERGE = "MR_MERGE";
     static final String MERGE_ACTION = "merge_request.merge";
+    /** The reviewer agent and the author still disagree after {@link #MAX_REVIEW_ROUNDS} rounds: the CTO decides. */
+    static final String ARBITRATE_ACTION = "merge_request.arbitrate";
     private static final int MAX_REVIEW_ROUNDS = 3;
     private static final int FULL_OUTPUTS = 8;
 
@@ -150,6 +153,14 @@ public class TaskExecution {
     @Scheduled(fixedDelayString = "${aiw.execution.sweep-ms:10000}", initialDelayString = "${aiw.execution.sweep-delay-ms:5000}")
     void sweep() {
         if (!autoStart || !sandboxes.enabled()) return;
+        // Tasks still waiting although none of their dependencies is pending any more (all done or cancelled).
+        jdbc.sql("""
+                SELECT t.id FROM tasks t WHERE t.status = 'CREATED'
+                  AND EXISTS (SELECT 1 FROM task_dependencies d WHERE d.task_id = t.id)
+                  AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks x ON x.id = d.depends_on_id
+                                  WHERE d.task_id = t.id AND x.status NOT IN ('DONE', 'CANCELLED'))
+                """).query(String.class).list()
+                .forEach(id -> tx.executeWithoutResult(s -> tasks.settle(id, Actor.system())));
         List<String> candidates = jdbc.sql("""
                 SELECT DISTINCT ON (t.assignee_id) t.id FROM tasks t JOIN agents a ON a.id = t.assignee_id
                 WHERE t.status = 'ASSIGNED' AND a.status = 'ACTIVE' AND a.provider_id IS NOT NULL AND a.model IS NOT NULL
@@ -864,7 +875,7 @@ public class TaskExecution {
         Task task = tasks.find(mr.taskId()).orElseThrow();
         TaskRun run = runs.find(mr.runId()).orElseThrow();
         Path repo = git.repo(mr.projectId()).orElseThrow();
-        String diff = git.diff(repo, mr.targetBranch(), mr.sourceBranch(), null);
+        List<GitService.FileChange> changed = git.changes(repo, mr.targetBranch(), mr.sourceBranch());
         TestRun tr = tests.list(mr.projectId(), task.id(), 1).stream().findFirst().orElse(null);
         String testOutput = tr == null ? "" : tests.output(tr.id()).map(o -> lastLines(o, 40)).orElse("");
         StringBuilder sb = new StringBuilder();
@@ -886,23 +897,48 @@ public class TaskExecution {
                     .append(": ").append(c.body()).append("\n"));
             sb.append("</earlier_comments>\n");
         }
-        sb.append("<diff>\n").append(AgentTools.clip(diff, 24_000)).append("\n</diff>\n");
+        String head = sb.toString();
+        sb.setLength(0);
         sb.append("""
-                Check correctness, the acceptance criteria and the tests that prove them. A criterion is met only if a \
-                test in the diff proves it; cite that test as evidence. Request changes for real defects only, with \
-                precise comments.
+                Check correctness, the acceptance criteria and the tests that prove them. A criterion about behaviour is \
+                met only if a test in the diff proves it: cite that test as evidence. A criterion about the code itself \
+                (language, style, comments, structure, no build step) is met when the diff shows it: cite the file as \
+                evidence. Do not ask for tools or test setups the task does not require. Do not repeat an earlier \
+                comment the diff now addresses, and do not comment on a part of a file you were not shown. Request \
+                changes for real defects only, with precise comments.
                 JSON: {"decision": "APPROVE" or "REQUEST_CHANGES", "summary": "two sentences",
                  "comments": [{"file": "path", "line": 12, "body": "..."}],
                  "criteria": [{"index": 1, "met": true, "evidence": "test name"}]}""");
-        AgentRunner.Context context = runner.context(reviewer, task.title(), 3_000, 2_000).oneShot();
-        JsonNode out = runner.completeJson(job, reviewer, context, sb.toString(), 6_000, "medium",
-                "Review !" + mr.number(), node -> {
-                    String d = node.path("decision").asString("");
-                    if (!Set.of("APPROVE", "REQUEST_CHANGES").contains(d)) throw new AgentRunner.InvalidOutput("decision must be APPROVE or REQUEST_CHANGES.");
-                    if (node.path("criteria").size() != task.acceptanceCriteria().size()) {
-                        throw new AgentRunner.InvalidOutput("criteria must have one entry per acceptance criterion (" + task.acceptanceCriteria().size() + ").");
-                    }
-                });
+        String tail = sb.toString();
+        JsonNode out = null;
+        // A provider with a small per-minute allowance (Groq free tier: 8 000) learns its limit on the first refusal:
+        // the review is then sized to fit it, the diff taking what is left.
+        for (int attempt = 0; out == null; attempt++) {
+            long perMinute = gateway.tokensPerMinute(reviewer.providerId(), reviewer.model()).orElse(0L);
+            long maxOut = perMinute > 0 ? Math.min(6_000, Math.max(800, perMinute / 5)) : 6_000;
+            AgentRunner.Context context = (perMinute > 0 ? runner.context(reviewer, task.title(), 1_000, 500)
+                    : runner.context(reviewer, task.title(), 3_000, 2_000)).oneShot();
+            int diffChars = 24_000;
+            if (perMinute > 0) {
+                long budget = (perMinute - maxOut - 1_200) * CHARS_PER_TOKEN - context.stable().length()
+                        - (context.dynamic() == null ? 0 : context.dynamic().length()) - head.length() - tail.length() - 200;
+                diffChars = (int) Math.max(1_500, Math.min(diffChars, budget));
+            }
+            String prompt = head + reviewDiff(repo, mr.targetBranch(), mr.sourceBranch(), changed, diffChars) + tail;
+            try {
+                out = runner.completeJson(job, reviewer, context, prompt, maxOut, "medium",
+                        "Review !" + mr.number(), node -> {
+                            String d = node.path("decision").asString("");
+                            if (!Set.of("APPROVE", "REQUEST_CHANGES").contains(d)) throw new AgentRunner.InvalidOutput("decision must be APPROVE or REQUEST_CHANGES.");
+                            if (node.path("criteria").size() != task.acceptanceCriteria().size()) {
+                                throw new AgentRunner.InvalidOutput("criteria must have one entry per acceptance criterion (" + task.acceptanceCriteria().size() + ").");
+                            }
+                        });
+            } catch (ModelCallException e) {
+                boolean learned = perMinute == 0 && gateway.tokensPerMinute(reviewer.providerId(), reviewer.model()).isPresent();
+                if (attempt > 0 || !learned) throw e;
+            }
+        }
         List<Task.Criterion> criteria = new ArrayList<>();
         for (int i = 0; i < task.acceptanceCriteria().size(); i++) {
             JsonNode c = out.path("criteria").get(i);
@@ -919,19 +955,82 @@ public class TaskExecution {
         concludeReview(mr, task, run, Actor.agent(reviewer.id()), reviewer.name(), approve, out.path("summary").asString(""), comments, criteria);
     }
 
+    /** Lock files and build output: listed for the reviewer, never shown (they would fill the diff budget). */
+    private static final java.util.regex.Pattern GENERATED = java.util.regex.Pattern.compile(
+            "(^|/)(package-lock\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml|bun\\.lockb|composer\\.lock|"
+            + "Gemfile\\.lock|poetry\\.lock|Pipfile\\.lock|uv\\.lock|Cargo\\.lock|go\\.sum)$"
+            + "|\\.min\\.(js|css)$|\\.map$|(^|/)(dist|build|node_modules|target|vendor)/");
+
+    /**
+     * The diff a reviewer reads: every changed file listed, generated files left out, and the room shared fairly
+     * between the others so that one large file cannot hide the rest (a lock file once hid every source file).
+     */
+    String reviewDiff(Path repo, String base, String ref, List<GitService.FileChange> changed, int maxChars) {
+        StringBuilder sb = new StringBuilder("<changed_files>\n");
+        List<GitService.FileChange> shown = new ArrayList<>();
+        for (GitService.FileChange c : changed) {
+            boolean generated = GENERATED.matcher(c.path()).find();
+            sb.append(c.status()).append(" ").append(c.path()).append(" +").append(c.added()).append(" -").append(c.removed())
+                    .append(generated ? " (generated, not shown)" : "").append("\n");
+            if (!generated) shown.add(c);
+        }
+        sb.append("</changed_files>\n");
+        Map<String, String> diffs = new java.util.LinkedHashMap<>();
+        for (GitService.FileChange c : shown) diffs.put(c.path(), git.diff(repo, base, ref, c.path()));
+        // Smallest first: each file gets its size or an equal share of what is left, whichever is smaller.
+        Map<String, Integer> room = new HashMap<>();
+        int left = Math.max(0, maxChars - sb.length() - 100), files = diffs.size();
+        for (Map.Entry<String, String> e : diffs.entrySet().stream().sorted(java.util.Comparator.comparingInt(x -> x.getValue().length())).toList()) {
+            int share = Math.min(e.getValue().length(), left / Math.max(1, files--));
+            room.put(e.getKey(), share);
+            left -= share;
+        }
+        boolean cut = false;
+        sb.append("<diff>\n");
+        for (Map.Entry<String, String> e : diffs.entrySet()) {
+            int r = room.get(e.getKey());
+            cut |= r < e.getValue().length();
+            sb.append(AgentTools.clip(e.getValue(), r)).append("\n");
+        }
+        sb.append("</diff>\n");
+        if (cut) sb.append("Some files are cut to fit the model's limits: judge what you see and the tests.\n");
+        return sb.toString();
+    }
+
     /** The CTO reviews (no teammate available, or the CTO steps in). Approving accepts the criteria as reviewed. */
     public MergeRequest humanReview(String mrId, String userId, boolean approve, String comment) {
-        MergeRequest mr = mrs.find(mrId).orElseThrow(() -> ApiException.notFound("Merge request"));
-        if (!Set.of("IN_REVIEW", "AWAITING_APPROVAL").contains(mr.status())) {
+        MergeRequest submitted = mrs.find(mrId).orElseThrow(() -> ApiException.notFound("Merge request"));
+        MergeRequest mr = submitted;
+        Task task = tasks.find(submitted.taskId()).orElseThrow();
+        TaskRun run = runs.find(submitted.runId()).orElseThrow();
+        if ("CHANGES_REQUESTED".equals(submitted.status()) && Set.of("BLOCKED", "PAUSED").contains(run.status())) {
+            // The work stopped on a refused review: the CTO can still judge the last submission, unchanged since.
+            Path repo = git.repo(submitted.projectId()).orElseThrow();
+            if (submitted.headCommit() != null && !submitted.headCommit().equals(git.revParse(repo, submitted.sourceBranch()))) {
+                throw ApiException.conflict("changed_since", "The branch changed after its last submission: resume the task so the agent submits it again");
+            }
+            tx.executeWithoutResult(s -> {
+                if ("BLOCKED".equals(task.status())) tasks.unblock(task.id(), Actor.human(userId));
+                tasks.advance(task.id(), "IN_REVIEW", Actor.human(userId), Map.of("mrId", submitted.id()));
+                runs.status(run, "SUBMITTED", null);
+                runs.step(run, "PLATFORM", null, "The CTO reviews !" + submitted.number(), Map.of(), "OK", 0, 0, 0);
+                agents.setResting(run.agentId(), "AVAILABLE", null);
+                mrs.handToHuman(submitted.id());
+            });
+            mr = mrs.find(mrId).orElseThrow();
+        } else if (!Set.of("IN_REVIEW", "AWAITING_APPROVAL").contains(mr.status())) {
             throw ApiException.conflict("not_in_review", "This merge request is not waiting for a review");
         }
-        Task task = tasks.find(mr.taskId()).orElseThrow();
-        TaskRun run = runs.find(mr.runId()).orElseThrow();
-        List<Task.Criterion> criteria = task.acceptanceCriteria().stream()
+        Task current = tasks.find(mr.taskId()).orElseThrow();
+        List<Task.Criterion> criteria = current.acceptanceCriteria().stream()
                 .map(c -> approve ? new Task.Criterion(c.text(), true, c.met() && c.evidence() != null ? c.evidence() : "accepted by the CTO in review") : c)
                 .toList();
         List<String[]> comments = comment == null || comment.isBlank() ? List.of() : List.<String[]>of(new String[] {null, null, comment});
-        concludeReview(mr, task, run, Actor.human(userId), "the CTO", approve, comment == null ? "" : comment, comments, criteria);
+        concludeReview(mr, current, run, Actor.human(userId), "the CTO", approve, comment == null ? "" : comment, comments, criteria);
+        // Reviewed from the merge request page: the arbitration card in the Inbox is settled with the same decision.
+        jdbc.sql("SELECT id FROM approvals WHERE action = ? AND target_id = ? AND status = 'PENDING'").params(ARBITRATE_ACTION, mrId)
+                .query(String.class).list()
+                .forEach(id -> approvals.decide(runs.workspaceOf(run), id, userId, approve, comment));
         return mrs.find(mrId).orElseThrow();
     }
 
@@ -951,11 +1050,26 @@ public class TaskExecution {
             payload.put("taskId", task.id());
             events.publish(ws, mr.projectId(), "merge_request.reviewed", reviewer, new Subject("merge_request", mr.id()), payload);
             if (!approve) {
-                if (round >= MAX_REVIEW_ROUNDS) {
-                    mrs.update(mr.id(), "CHANGES_REQUESTED", null, null);
-                    Agent author = agents.find(run.agentId()).orElseThrow();
-                    runs.status(run, "RUNNING", null);
-                    blockInTx(run, task, author, "Still not approved after " + MAX_REVIEW_ROUNDS + " review rounds");
+                if (reviewer.kind() == Actor.Kind.AGENT && round >= MAX_REVIEW_ROUNDS) {
+                    // No agreement between the reviewer and the author: the CTO arbitrates instead of the task blocking.
+                    mrs.handToHuman(mr.id());
+                    runs.status(run, "SUBMITTED", null);
+                    StringBuilder why = new StringBuilder(summary == null ? "" : summary.strip());
+                    comments.forEach(c -> why.append("\n- ").append(c[0] == null ? "" : c[0] + " ").append(c[2]));
+                    criteria.stream().filter(c -> !c.met()).forEach(c -> why.append("\n- Not proven: ").append(c.text()));
+                    runs.step(run, "PLATFORM", null, "No agreement with " + reviewerName + " after " + round
+                            + " review rounds: the CTO decides on !" + mr.number(), Map.of("text", why.toString()), "OK", 0, 0, 0);
+                    agents.setResting(run.agentId(), "AVAILABLE", null);
+                    Map<String, Object> details = new HashMap<>();
+                    details.put("number", mr.number());
+                    details.put("taskId", task.id());
+                    details.put("into", mr.targetBranch());
+                    details.put("reviewer", reviewerName);
+                    details.put("rounds", round);
+                    details.put("remarks", AgentTools.clip(why.toString(), 3_000));
+                    approvals.request(ws, mr.projectId(), reviewer, ARBITRATE_ACTION, "merge_request", mr.id(),
+                            "Decide on !" + mr.number() + " " + mr.title() + ": " + reviewerName + " still requests changes after "
+                                    + round + " rounds", details);
                     return;
                 }
                 mrs.update(mr.id(), "CHANGES_REQUESTED", null, null);
@@ -1031,6 +1145,14 @@ public class TaskExecution {
 
     @EventListener
     void onApproval(ApprovalDecided e) {
+        if (ARBITRATE_ACTION.equals(e.action())) {
+            // Approving accepts the work as it is (and merges it); declining sends the reason back to the author.
+            MergeRequest mr = mrs.find(e.targetId()).orElse(null);
+            if (mr == null || !"IN_REVIEW".equals(mr.status()) || mr.reviewerAgentId() != null) return; // decided elsewhere
+            humanReview(mr.id(), e.userId(), e.approved(), e.approved() ? null
+                    : e.reason() == null || e.reason().isBlank() ? "The CTO sides with the reviewer: address the remarks." : e.reason());
+            return;
+        }
         if (!MERGE_ACTION.equals(e.action())) return;
         MergeRequest mr = mrs.find(e.targetId()).orElse(null);
         if (mr == null || !"AWAITING_APPROVAL".equals(mr.status())) return;

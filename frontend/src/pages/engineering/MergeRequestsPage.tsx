@@ -74,7 +74,9 @@ function MergeRequestDetail({ mrId }: { mrId: string }) {
   const byFile = (c: ReviewComment) => c.file ?? "";
   const general = comments.filter((c) => !c.file);
   const open = mr.status !== "MERGED" && mr.status !== "CLOSED";
-  const humanReview = open && mr.status === "IN_REVIEW";
+  // A task stopped on a refused review can still be judged by the CTO on its last submission.
+  const stoppedOnReview = mr.status === "CHANGES_REQUESTED" && task?.status === "BLOCKED";
+  const humanReview = open && ((mr.status === "IN_REVIEW" && !mr.reviewerAgentId) || stoppedOnReview);
 
   return (
     <div className="grid gap-5 lg:grid-cols-[1fr_330px]">
@@ -144,7 +146,9 @@ function MergeRequestDetail({ mrId }: { mrId: string }) {
             </>
           )}
           {mr.status === "IN_REVIEW" && <p className="text-[13px] text-muted">{mr.reviewerAgentId ? `${agents[mr.reviewerAgentId]?.name ?? "A teammate"} is reviewing.` : "No teammate can review this: the review is yours."}</p>}
-          {mr.status === "CHANGES_REQUESTED" && <p className="text-[13px] text-muted">The author is working on the requested changes.</p>}
+          {mr.status === "CHANGES_REQUESTED" && <p className="text-[13px] text-muted">{stoppedOnReview
+            ? "The task is blocked on this review. You can judge the last submission: approving accepts it as it is and merges it."
+            : "The author is working on the requested changes."}</p>}
           {humanReview && (
             <form className="mt-3 space-y-2 border-t border-line pt-3" onSubmit={(e) => e.preventDefault()}>
               <Textarea rows={3} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Your review comment (required to request changes)" />

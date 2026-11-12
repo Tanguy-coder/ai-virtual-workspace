@@ -32,3 +32,12 @@ Corrections :
 
 - **Nouvel ordre `update_task`** `{"task":3,"title","description","criteria"}` : il réécrit une tâche ouverte, et l'agent qui y travaille est prévenu. Le manuel du Lead précise qu'un changement de périmètre se fait ici, pas par message.
 - **Tâches fermées dans l'état :** `<project_state>` ajoute la ligne « Closed (no longer to do): T-1 cancelled, … ».
+
+## Dépendances annulées (2026-11-12)
+
+Constaté sur « To do list » : après l'abandon de Vite, T-4 et T-7 restaient en `CREATED`, parce qu'elles dépendaient de tâches annulées et que seule une dépendance `DONE` les libérait. Rien ne démarrait.
+
+- **Dépendance annulée :** elle n'est plus attendue (`TaskService.settle` ignore `DONE` et `CANCELLED`).
+- **Annulation d'une tâche :** ses dépendantes sont réévaluées tout de suite.
+- **Balayage d'exécution :** il libère aussi les tâches restées en attente sans dépendance encore ouverte, y compris celles bloquées avant ce correctif.
+- **Test :** `OrchestrationIntegrationTest`.

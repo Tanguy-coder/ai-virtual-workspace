@@ -84,6 +84,12 @@ public class MergeRequestService {
                 .params(reviewerId, id).update();
     }
 
+    /** No agent reviews any more: the review is the CTO's. */
+    public void handToHuman(String id) {
+        jdbc.sql("UPDATE merge_requests SET status = 'IN_REVIEW', reviewer_agent_id = NULL, updated_at = now() WHERE id = ?")
+                .param(id).update();
+    }
+
     public void setApproval(String id, String approvalId) {
         jdbc.sql("UPDATE merge_requests SET approval_id = ?, updated_at = now() WHERE id = ?").params(approvalId, id).update();
     }

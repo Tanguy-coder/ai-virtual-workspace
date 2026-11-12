@@ -219,6 +219,10 @@ class OrchestrationIntegrationTest {
         // Mode B on the same graph: cycles are refused, the human assigns, blocks and unblocks.
         assertThat(api.post("/api/v1/tasks/" + t1.get("id").asString() + "/dependencies",
                 Map.of("dependsOn", List.of(t2.get("id").asString()))).status()).isEqualTo(409);
+        // A cancelled dependency is no longer awaited: its dependent becomes ready to start.
+        api.post("/api/v1/tasks/" + t1.get("id").asString() + "/cancel", Map.of());
+        assertThat(api.get("/api/v1/tasks/" + t2.get("id").asString()).json().get("task").get("status").asString())
+                .isIn("READY", "ASSIGNED");
         JsonNode manual = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Write the README",
                 "acceptanceCriteria", List.of("README exists"), "assigneeId", ids.get("QA Engineer 01"))).json();
         assertThat(manual.get("status").asString()).isEqualTo("ASSIGNED");

@@ -69,6 +69,7 @@ class ExecutionIntegrationTest {
     static final String FIX = """
             {"thought": "The test shows subtraction; fix the operator.", "actions": [
               {"tool": "file.edit", "args": {"path": "src/sum.js", "old": "a - b", "new": "a + b"}},
+              {"tool": "file.write", "args": {"path": "package-lock.json", "content": "{\\"lockfileVersion\\": 3, \\"hidden\\": \\"LOCKFILE-BODY\\"}\\n"}},
               {"tool": "exec", "args": {"command": "npm test"}},
               {"tool": "git.commit", "args": {"message": "Fix sum"}},
               {"tool": "task.submit", "args": {"summary": "Fixed; test 'adds two numbers' passes."}}]}""";
@@ -82,11 +83,20 @@ class ExecutionIntegrationTest {
 
     static final String SOLO = FIRST.replace("a - b", "a + b");
 
+    static final String DISPUTE = """
+            {"decision": "REQUEST_CHANGES", "summary": "Needs a browser test.", "comments": [{"file": "tests/sum.test.js", "line": 1, "body": "Add a jsdom test."}],
+             "criteria": [{"index": 1, "met": false, "evidence": ""}]}""";
+
+    static final String RESUBMIT = """
+            {"thought": "The code is right; submit again.", "actions": [{"tool": "task.submit", "args": {"summary": "Unchanged: the test proves it."}}]}""";
+
     static String script(String body) {
         if (body.contains("<orders_manual>") && body.contains("Ask me again for main")) {
             return "Asking you for the merge.\n<orders>[{\"do\": \"merge_main\", \"note\": \"Solo sum\"}, {\"do\": \"merge_main\"}]</orders>";
         }
         if (body.contains("Loop forever")) return LOOP;
+        if (body.contains("Disputed sum") && body.contains("You review merge request")) return DISPUTE;
+        if (body.contains("Disputed sum") && body.contains("<tools>")) return body.contains("Changes requested by") ? RESUBMIT : SOLO;
         if (body.contains("Solo sum") && body.contains("<tools>")) return SOLO;
         if (body.contains("You review merge request")) return REVIEW;
         if (body.contains("<tools>")) return body.contains("Tests failed on submission") ? FIX : FIRST;
@@ -118,6 +128,11 @@ class ExecutionIntegrationTest {
         assertThat(mr.get("targetBranch").asString()).isEqualTo("develop");
         assertThat(mr.get("reviewerAgentId").asString()).isEqualTo(lead);
         assertThat(mr.get("checks").toString()).contains("\"tests\"").doesNotContain("failed");
+
+        // The reviewer sees every changed file listed; a lock file is listed but its content never fills the diff.
+        String review = stub.requests.stream().map(r -> r.body()).filter(b -> b.contains("You review merge request") && b.contains("Sum two numbers")).findFirst().orElseThrow();
+        assertThat(review).contains("package-lock.json +1 -0 (generated, not shown)").contains("exports.sum")
+                .doesNotContain("LOCKFILE-BODY");
 
         JsonNode run = api.get("/api/v1/tasks/" + taskId + "/run").json();
         assertThat(run.get("run").get("branch").asString()).startsWith("agent/java-engineer-01/t-1-sum-two-numbers");
@@ -209,6 +224,40 @@ class ExecutionIntegrationTest {
         api.post("/api/v1/workspaces/" + ws + "/approvals/" + again.get(0).get("id").asString() + "/decision", Map.of("approve", true));
         assertThat(api.get("/api/v1/projects/" + p + "/repo/file?ref=main&path=src/sum.js").json().get("content").asString())
                 .contains("a + b");
+    }
+
+    /** The Lead keeps refusing: after 3 rounds the CTO arbitrates from the Inbox instead of the task blocking. */
+    @Test
+    void aReviewDisagreementGoesToTheCto() {
+        stub.anthropicResponder = ExecutionIntegrationTest::script;
+        TestApi api = new TestApi(port);
+        api.register("cto-dispute");
+        String ws = api.post("/api/v1/workspaces", Map.of("name", "Dispute")).json().get("id").asString();
+        api.post("/api/v1/workspaces/" + ws + "/providers", Map.of(
+                "kind", "ANTHROPIC", "name", "Anthropic", "baseUrl", stub.baseUrl(), "apiKey", "sk-ant-test"));
+        String p = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "Dispute")).json().get("id").asString();
+        String dev = api.post("/api/v1/projects/" + p + "/agents", Map.of("roleTemplateId", "rt_java")).json().get("id").asString();
+        String taskId = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Disputed sum",
+                "acceptanceCriteria", List.of("sum(2, 3) returns 5"), "assigneeId", dev)).json().get("id").asString();
+
+        JsonNode approval = await(() -> api.get("/api/v1/workspaces/" + ws + "/approvals?status=PENDING").json(), a -> a.size() == 1).get(0);
+        assertThat(approval.get("action").asString()).isEqualTo("merge_request.arbitrate");
+        assertThat(approval.get("summary").asString()).contains("still requests changes after 3 rounds");
+        assertThat(approval.get("details").get("remarks").asString()).contains("Add a jsdom test");
+        JsonNode task = api.get("/api/v1/tasks/" + taskId).json().get("task");
+        assertThat(task.get("status").asString()).isEqualTo("IN_REVIEW");
+        JsonNode mr = api.get("/api/v1/projects/" + p + "/merge-requests").json().get(0);
+        assertThat(mr.get("status").asString()).isEqualTo("IN_REVIEW");
+        assertThat(mr.get("reviewerAgentId").isNull()).isTrue();
+
+        // The CTO accepts the work as it is: it merges into develop and the task is done.
+        api.post("/api/v1/workspaces/" + ws + "/approvals/" + approval.get("id").asString() + "/decision", Map.of("approve", true));
+        await(() -> api.get("/api/v1/tasks/" + taskId).json().get("task"), t -> t.get("status").asString().equals("DONE"));
+        JsonNode merged = api.get("/api/v1/projects/" + p + "/merge-requests").json().get(0);
+        assertThat(merged.get("status").asString()).isEqualTo("MERGED");
+        assertThat(merged.get("targetBranch").asString()).isEqualTo("develop");
+        assertThat(api.get("/api/v1/tasks/" + taskId + "/run").json().get("steps").toString())
+                .contains("No agreement with Lead after 3 review rounds").doesNotContain("Still not approved");
     }
 
     private static JsonNode await(Supplier<JsonNode> read, Predicate<JsonNode> done) {

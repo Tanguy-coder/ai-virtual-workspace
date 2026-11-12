@@ -213,7 +213,9 @@ public class AgentRunner {
                 gateway.forget(result);
                 error = e.getMessage();
                 last = result.text();
-                turns.add(new ChatTurn(ChatTurn.Role.ASSISTANT, result.text().isBlank() ? "(empty)" : result.text()));
+                // Only the start of the faulty reply goes back: the correction must fit small per-minute allowances too.
+                String echo = result.text().length() > 2_000 ? result.text().substring(0, 2_000) + "…" : result.text();
+                turns.add(new ChatTurn(ChatTurn.Role.ASSISTANT, echo.isBlank() ? "(empty)" : echo));
                 turns.add(new ChatTurn(ChatTurn.Role.USER, "Your reply could not be used: " + e.getMessage()
                         + "\nReply again with only the corrected JSON object."));
             }

@@ -46,12 +46,22 @@ export function InboxPage() {
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-semibold">{a.summary}</p>
                 <p className="mt-0.5 text-[12px] text-muted">
-                  {a.projectId ? `${name(a.projectId)} · ` : ""}{a.action === "branch.merge_main" ? "asked by your Lead" : a.action} · requested {dateTime(a.createdAt)}
+                  {a.projectId ? `${name(a.projectId)} · ` : ""}{a.action === "branch.merge_main" ? "asked by your Lead" : a.action === "merge_request.arbitrate" ? "the reviewer and the author disagree" : a.action} · requested {dateTime(a.createdAt)}
                 </p>
                 {a.action === "branch.merge_main" && <MainMergeDetails details={a.details} />}
+                {a.action === "merge_request.arbitrate" && (
+                  <div className="mt-2 text-[12px] text-muted">
+                    <p className="whitespace-pre-line">{String(a.details.remarks ?? "")}</p>
+                    <Link className="mt-1 inline-block text-fg underline" to={`/w/${workspaceId}/p/${a.projectId}/merge-requests/${a.targetId}`}>
+                      Open !{String(a.details.number ?? "")} and its diff
+                    </Link>
+                  </div>
+                )}
                 <div className="mt-3 flex gap-2">
-                  <Button onClick={() => decide.mutate({ id: a.id, approve: true })}>Approve</Button>
-                  <Button variant="danger" onClick={() => decide.mutate({ id: a.id, approve: false })}>Reject</Button>
+                  <Button onClick={() => decide.mutate({ id: a.id, approve: true })}>
+                    {a.action === "merge_request.arbitrate" ? "Accept as is and merge" : "Approve"}</Button>
+                  <Button variant="danger" onClick={() => decide.mutate({ id: a.id, approve: false })}>
+                    {a.action === "merge_request.arbitrate" ? "Side with the reviewer" : "Reject"}</Button>
                 </div>
               </div>
             </div>

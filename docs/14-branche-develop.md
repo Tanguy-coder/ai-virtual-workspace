@@ -77,3 +77,25 @@ main ─────────────────────────
   - l'ordre `merge_main` dans le chat crée une nouvelle demande, et un second ordre est refusé (« already waiting ») ;
   - `<project_state>` montre l'avance de `develop` ;
   - l'approbation merge dans `main`.
+
+## Revue qui tient dans les limites du modèle (2026-11-11)
+
+Constaté sur « To do list » : la relecture de T-17 par le Lead (Groq, 8000 tokens par minute) a demandé 3 fois les mêmes changements, puis a bloqué la tâche. Le diff commençait par 1002 lignes de `package-lock.json`, qui remplissaient toute la place : le Lead ne voyait jamais `src/` ni `tests/`, où l'agent avait pourtant fait les corrections.
+
+- **Diff de revue** (`TaskExecution.reviewDiff`) :
+  - tous les fichiers changés sont listés (`<changed_files>`) ;
+  - les fichiers générés sont listés sans contenu : fichiers lock, `*.min.js`, `*.map`, `dist/`, `build/`, `node_modules/`, `target/`, `vendor/` ;
+  - la place restante est partagée équitablement entre les autres fichiers, du plus petit au plus grand, pour qu'aucun fichier n'en cache un autre.
+- **Limite par minute** : quand le fournisseur en annonce une, la revue s'y ajuste (réponse d'environ 1600 tokens, contexte réduit, diff à la place restante). Le premier refus de Groq apprend la limite ; la revue repart aussitôt, réduite.
+- **Consignes du relecteur** :
+  - un critère de comportement se prouve par un test ;
+  - un critère sur le code lui-même (langage, style, commentaires, absence de build) se prouve par le fichier qui le montre ;
+  - le relecteur n'exige pas d'outils absents de la tâche, ne répète pas un commentaire déjà traité et ne commente pas une partie qu'il n'a pas vue.
+- **Désaccord : le CTO tranche** (remplace le blocage après 3 tours). Constaté sur T-17 : 3 critères sur 4 étaient validés, mais le Lead exigeait toujours un test jsdom pour « Runs in latest browsers », et l'agent s'est bloqué lui-même faute de pouvoir le satisfaire.
+  - Dès le 3e tour refusé par un agent relecteur, la tâche ne bloque plus : la MR revient au CTO (`reviewer_agent_id` vidé, run `SUBMITTED`), et une carte `merge_request.arbitrate` arrive dans l'Inbox avec les remarques du relecteur.
+  - « Accept as is and merge » accepte les critères tels quels et merge dans la cible.
+  - « Side with the reviewer » renvoie les remarques à l'auteur.
+  - Le CTO peut aussi décider depuis la page de la MR ; la carte de l'Inbox est alors réglée avec la même décision.
+  - Une tâche déjà bloquée sur une revue refusée (MR `CHANGES_REQUESTED`, travail `BLOCKED` ou `PAUSED`) peut aussi être jugée depuis la page de la MR, si la branche n'a pas bougé depuis la dernière soumission.
+  - Test : `ExecutionIntegrationTest.aReviewDisagreementGoesToTheCto`.
+- **Correction de JSON** : seuls les 2000 premiers caractères de la réponse fautive sont renvoyés au modèle.
