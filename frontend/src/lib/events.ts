@@ -31,6 +31,7 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
     case "job.completed": return `${who(p.agentId)} finished the ${job[String(p.type)] ?? p.type}`;
     case "job.failed": return `${who(p.agentId)} is blocked: ${job[String(p.type)] ?? p.type} failed — ${p.error}`;
     case "job.retried": return `The CTO retried the ${job[String(p.type)] ?? p.type}`;
+    case "job.deferred": return `${who(p.agentId)} waits for the provider: ${p.reason}`;
     case "briefing.started": return "The CTO briefed the Lead";
     case "briefing.analyzed": return `The Lead analyzed the specification · ${p.questions} question(s), ${p.risks} risk(s)`;
     case "briefing.answered": return "The CTO answered the Lead's questions";
@@ -105,7 +106,7 @@ export function tone(e: EventRecord): "danger" | "warn" | "ok" | "muted" {
   if (e.type === "message.failed" || e.payload.outcome === "ERROR" || e.type.endsWith(".failed") || e.type === "task.blocked") return "danger";
   if (e.type === "hiring_proposal.created" || e.type === "briefing.analyzed") return "warn";
   if (e.type === "plan.created" || e.type === "meeting.minutes_published" || e.type === "hiring_proposal.accepted") return "ok";
-  if (e.type.startsWith("budget.") || e.type === "approval.requested") return "warn";
+  if (e.type.startsWith("budget.") || e.type === "approval.requested" || e.type === "job.deferred") return "warn";
   if (e.type === "agent.hired" || e.type === "approval.granted") return "ok";
   return "muted";
 }

@@ -45,3 +45,19 @@ T-14 était bloquée sur « No JSON object was found in the reply ». gpt-oss re
 - **Compteur de réponses inutilisables :** il repart à zéro après un blocage. Une reprise donne donc à nouveau 3 essais, au lieu d'un seul.
 
 Test : `RealignmentIntegrationTest.nativeToolCallsInAnOkReplyAndTooManyActionsAreRead`.
+
+## Quota quotidien : attendre au lieu de bloquer (2026-11-12)
+
+Constaté sur « To do list » : T-24, T-29 et T-30 se sont bloquées sur « Provider error 429 … tokens per day (TPD): Limit 200000, Used 198681 … try again in 7m45s ». Sur Groq, l'offre gratuite donne 200 000 tokens par jour et par modèle, partagés par tous les agents qui l'utilisent.
+
+- **La passerelle** (`ModelGateway.afterRateLimit`) lit le délai de Groq, y compris en heures (« 1h2m3s »).
+  - Délai de 60 s ou moins : elle attend et rappelle, comme avant.
+  - Délai plus long : elle lève une erreur 429 claire, qui porte le délai (`retryAfterSeconds`), par exemple « Groq daily limit reached for … : the work waits 8 min and resumes by itself ».
+- **Le worker** (`AgentWorker.defer`) remet alors le job en file jusqu'à la fin du délai, plafonnée à 24 h.
+  - La tentative ne compte pas.
+  - Il publie l'événement `job.deferred`.
+  - La tâche n'est pas bloquée : le run reste `RUNNING`, avec une étape « Waiting: … ».
+- **Pour éviter l'attente** : répartir les agents sur plusieurs modèles, chacun ayant son propre quota chez Groq, ou sur un autre fournisseur.
+- **Tests** :
+  - `ModelGatewayRateLimitTest.aDailyLimitTellsHowLongToWait` vérifie la lecture du délai ;
+  - `RealignmentIntegrationTest` vérifie l'étape « Waiting: » et que la tâche n'est pas bloquée.

@@ -408,6 +408,17 @@ class RealignmentIntegrationTest {
         // Both 413s failed their attempt (the 800-token cap learned above leaves no room to shrink); the third attempt
         // went through. The "same Requested" path is covered in ModelGatewayRateLimitTest.
         assertThat(stub.requests.subList(mark, stub.requests.size())).hasSize(3);
+
+        // A daily quota (Groq TPD) with a long wait: the step waits in the queue, the task is not blocked.
+        stub.openAiErrors.add(new Object[] {429, """
+                {"error":{"message":"Rate limit reached for model `stub-large` in organization `org_1` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198681, Requested 2397. Please try again in 7m45.696s.","type":"tokens","code":"rate_limit_exceeded"}}"""});
+        String daily = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Daily quota",
+                "acceptanceCriteria", List.of("it works"), "assigneeId", dev.get("id").asString())).json().get("id").asString();
+        JsonNode waiting = await(() -> api.get("/api/v1/tasks/" + daily + "/run").json(),
+                v -> !v.get("run").isNull() && v.get("steps").toString().contains("Waiting: "));
+        assertThat(waiting.get("steps").toString()).contains("daily limit reached").contains("waits 8 min");
+        assertThat(waiting.get("run").get("status").asString()).isEqualTo("RUNNING");
+        assertThat(api.get("/api/v1/tasks/" + daily).json().get("task").get("status").asString()).isNotEqualTo("BLOCKED");
     }
 
     /**

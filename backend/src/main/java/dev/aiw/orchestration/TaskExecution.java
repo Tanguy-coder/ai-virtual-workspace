@@ -756,6 +756,12 @@ public class TaskExecution {
         }));
     }
 
+    /** A provider limit: the step runs again by itself later; the run stays open and the task is not blocked. */
+    void deferred(AgentJob job, String reason) {
+        Optional.ofNullable(job.string("runId")).flatMap(runs::find)
+                .ifPresent(run -> runs.step(run, "PLATFORM", null, "Waiting: " + reason, Map.of(), "OK", 0, 0, 0));
+    }
+
     void retried(AgentJob job) {
         Optional.ofNullable(job.string("runId")).flatMap(runs::find).ifPresent(run -> tx.executeWithoutResult(s -> {
             Task task = tasks.find(run.taskId()).orElseThrow();
@@ -1291,6 +1297,7 @@ public class TaskExecution {
         @Override public void handle(AgentJob job) { exec.step(job); }
         @Override public void onFailed(AgentJob job, String error) { exec.failed(job, error); }
         @Override public void onRetry(AgentJob job) { exec.retried(job); }
+        @Override public void onDeferred(AgentJob job, String reason) { exec.deferred(job, reason); }
     }
 
     @Component

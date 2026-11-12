@@ -48,4 +48,20 @@ class ModelGatewayRateLimitTest {
                 + "Requested 4577. Please try again in 7.905s."), 0, last)).isSameAs(same);
         assertThat(gateway.afterRateLimit(groq, same, error(401, "Invalid API key"), 0, last)).isNull();
     }
+
+    /** Groq's daily quota (seen on the CTO's project): too long to hold the call, the job waits and resumes by itself. */
+    @Test
+    void aDailyLimitTellsHowLongToWait() {
+        long[] last = {-1};
+        String tpd = "Rate limit reached for model `openai/gpt-oss-120b` in organization `org_1` service tier `on_demand` on tokens "
+                + "per day (TPD): Limit 200000, Used 198681, Requested 2397. Please try again in 7m45.696s. Need more tokens?";
+        assertThatThrownBy(() -> gateway.afterRateLimit(groq, request(2_000), error(429, tpd), 0, last))
+                .isInstanceOfSatisfying(ModelCallException.class, e -> {
+                    assertThat(e.retryAfterSeconds()).isEqualTo(466);
+                    assertThat(e.statusCode()).isEqualTo(429);
+                    assertThat(e.getMessage()).contains("daily limit reached").contains("waits 8 min").contains("resumes by itself");
+                });
+        assertThatThrownBy(() -> gateway.afterRateLimit(groq, request(2_000), error(429, "per day: Please try again in 1h2m3s."), 0, last))
+                .isInstanceOfSatisfying(ModelCallException.class, e -> assertThat(e.retryAfterSeconds()).isEqualTo(3_723));
+    }
 }

@@ -3,6 +3,7 @@ package dev.aiw.agentruntime;
 import dev.aiw.events.EventPublisher;
 import dev.aiw.events.Subject;
 import dev.aiw.organization.AgentService;
+import dev.aiw.modelgateway.ModelCallException;
 import dev.aiw.shared.Actor;
 import dev.aiw.shared.ApiException;
 import java.lang.management.ManagementFactory;
@@ -140,9 +141,40 @@ public class AgentWorker {
         } catch (JobFailure | ApiException e) {
             fail(job, e.getMessage(), false);
         } catch (RuntimeException e) {
+            ModelCallException limit = providerLimit(e);
+            if (limit != null) {
+                defer(job, limit);
+                return;
+            }
             log.warn("Job {} ({}) attempt {} failed", job.id(), job.type(), job.attempts(), e);
             fail(job, e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(), true);
         }
+    }
+
+    /** A provider limit with a known wait longer than the gateway holds a call (Groq's daily quota, for instance). */
+    private static ModelCallException providerLimit(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof ModelCallException m && m.statusCode() == 429 && m.retryAfterSeconds() > 0) return m;
+        }
+        return null;
+    }
+
+    /** The job goes back to the queue until the provider accepts calls again; the attempt does not count. */
+    private void defer(AgentJob job, ModelCallException limit) {
+        long wait = Math.min(limit.retryAfterSeconds() + 5, 24 * 3600);
+        tx.executeWithoutResult(s -> {
+            int updated = jdbc.sql("""
+                    UPDATE agent_jobs SET status = 'QUEUED', attempts = greatest(attempts - 1, 0), last_error = ?,
+                                          lease_owner = NULL, lease_until = NULL, run_after = now() + make_interval(secs => ?)
+                    WHERE id = ? AND status = 'RUNNING'
+                    """).params(limit.getMessage(), wait, job.id()).update();
+            if (updated == 0) return;
+            events.publish(job.workspaceId(), job.projectId(), "job.deferred", Actor.agent(job.agentId()),
+                    new Subject("job", job.id()), Map.of("type", job.type(), "agentId", job.agentId(), "reason", limit.getMessage(),
+                            "waitSeconds", wait));
+            JobHandler handler = handlers.get(job.type());
+            if (handler != null) handler.onDeferred(job, limit.getMessage());
+        });
     }
 
     private void fail(AgentJob job, String error, boolean retryable) {

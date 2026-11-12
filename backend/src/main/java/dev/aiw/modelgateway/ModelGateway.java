@@ -36,7 +36,7 @@ public class ModelGateway {
     private static final Pattern MODEL_MAX = Pattern.compile("max_tokens`? must be less than or equal to `?(\\d+)");
     /** OpenRouter credits: "You requested up to 8000 tokens, but can only afford 2395". */
     private static final Pattern AFFORD = Pattern.compile("can only afford (\\d+)");
-    private static final Pattern TRY_AGAIN = Pattern.compile("try again in (?:(\\d+)m)?([\\d.]+)(ms|s)");
+    private static final Pattern TRY_AGAIN = Pattern.compile("try again in (?:(\\d+)h)?(?:(\\d+)m)?([\\d.]+)(ms|s)");
 
     /** Output cap learned per provider and model from "request too large" answers (output tokens per minute). */
     private final Map<String, Long> outputCaps = new ConcurrentHashMap<>();
@@ -197,12 +197,19 @@ public class ModelGateway {
         long wait = e.retryAfterSeconds();
         Matcher again = TRY_AGAIN.matcher(message);
         if (wait < 0 && again.find()) {
-            double v = Double.parseDouble(again.group(2));
-            double secs = "ms".equals(again.group(3)) ? v / 1000 : v;
-            wait = (long) Math.ceil(secs + (again.group(1) == null ? 0 : Long.parseLong(again.group(1)) * 60));
+            double v = Double.parseDouble(again.group(3));
+            double secs = "ms".equals(again.group(4)) ? v / 1000 : v;
+            wait = (long) Math.ceil(secs + (again.group(2) == null ? 0 : Long.parseLong(again.group(2)) * 60)
+                    + (again.group(1) == null ? 0 : Long.parseLong(again.group(1)) * 3600));
         }
         if (wait < 0) wait = 5L << attempt; // 5, 10, 20, 40 s
-        if (wait > MAX_WAIT_SECONDS) return null;
+        if (wait > MAX_WAIT_SECONDS) {
+            // Too long to hold the call (a daily quota, say): the job waits in the queue and resumes by itself.
+            String kind = message.contains("per day") ? "daily limit" : "rate limit";
+            throw new ModelCallException(provider.name() + " " + kind + " reached for " + request.model()
+                    + ": the work waits " + (wait >= 120 ? (wait + 59) / 60 + " min" : wait + " s") + " and resumes by itself."
+                    + " A model on another provider avoids the wait.", 429, e, wait);
+        }
         log.info("{} {}: rate limited, waiting {} s (attempt {})", provider.name(), request.model(), wait, attempt + 1);
         sleep(wait * 1000 + 250);
         return request;

@@ -13,6 +13,9 @@ public interface JobHandler {
     /** Called once when the job has failed for good, so the owner can record the failure on its own objects. */
     default void onFailed(AgentJob job, String error) {}
 
+    /** Called when the job waits for a provider limit and will run again by itself at a later time. */
+    default void onDeferred(AgentJob job, String reason) {}
+
     /** Called when a human retries a failed job, before it is queued again. */
     default void onRetry(AgentJob job) {}
 }
