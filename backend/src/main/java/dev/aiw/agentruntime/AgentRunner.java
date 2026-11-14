@@ -208,8 +208,10 @@ public class AgentRunner {
                 }
                 JsonNode node = parse(result.text());
                 validator.accept(node);
+                gateway.noteReply(agent.workspaceId(), result, true);
                 return node;
             } catch (InvalidOutput e) {
+                gateway.noteReply(agent.workspaceId(), result, false);
                 gateway.forget(result);
                 error = e.getMessage();
                 last = result.text();
@@ -233,7 +235,7 @@ public class AgentRunner {
         try {
             result = gateway.complete(new ModelRequest(agent.workspaceId(), agent.projectId(), agent.id(),
                     agent.providerId(), agent.model(), context.stable(), context.dynamic(), turns, maxTokens, effort,
-                    tier, context.cache()));
+                    tier, context.cache(), agent.need()));
         } catch (ModelCallException e) {
             error = e.getMessage();
             throw e;
@@ -282,7 +284,7 @@ public class AgentRunner {
                 new Subject("agent", agent.id()), payload);
     }
 
-    JsonNode parse(String text) {
+    static JsonNode parse(String text) {
         String t = text.strip();
         if (t.startsWith("```")) {
             int firstNewline = t.indexOf('\n');
@@ -294,16 +296,62 @@ public class AgentRunner {
         if (open < 0 || close < open) {
             throw new InvalidOutput(text == null || text.isBlank() ? "The reply was empty." : "No JSON object was found in the reply.");
         }
+        String json = t.substring(open, close + 1);
+        JsonNode node;
         try {
-            JsonNode node = LENIENT.readTree(t.substring(open, close + 1));
-            if (!node.isObject()) throw new InvalidOutput("The reply is not a JSON object.");
-            return node;
+            node = LENIENT.readTree(json);
         } catch (RuntimeException e) {
-            if (e instanceof InvalidOutput io) throw io;
-            // Jackson appends "at [Source: REDACTED ...]": useless to the model and to the CTO.
-            String why = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage().split("\n at \\[Source")[0].strip();
-            throw new InvalidOutput("The JSON is malformed: " + why);
+            // Small models drop or swap a closing bracket ({"actions":[{...}]} written {"actions":[{...]}): one repair,
+            // free, instead of a correction round trip. Only kept when the repaired text parses.
+            String repaired = balanceBrackets(json);
+            try {
+                node = repaired.equals(json) ? null : LENIENT.readTree(repaired);
+            } catch (RuntimeException again) {
+                node = null;
+            }
+            if (node == null) {
+                // Jackson adds "(for Object starting at [Source: REDACTED ...])": useless to the model and to the CTO.
+                String why = e.getMessage() == null ? e.getClass().getSimpleName()
+                        : e.getMessage().split("\\s*\\(for \\w+ starting at|\\s+at \\[Source")[0].strip();
+                throw new InvalidOutput("The JSON is malformed: " + why);
+            }
         }
+        if (!node.isObject()) throw new InvalidOutput("The reply is not a JSON object.");
+        return node;
+    }
+
+    /**
+     * Closes what the text left open, outside strings: a closer that does not match the innermost open bracket first
+     * closes the brackets in between; brackets still open at the end are closed. A stray closer is dropped.
+     */
+    static String balanceBrackets(String json) {
+        StringBuilder out = new StringBuilder(json.length() + 8);
+        java.util.ArrayDeque<Character> open = new java.util.ArrayDeque<>();
+        boolean inString = false;
+        for (int i = 0; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (inString) {
+                out.append(c);
+                if (c == '\\' && i + 1 < json.length()) out.append(json.charAt(++i));
+                else if (c == '"') inString = false;
+                continue;
+            }
+            switch (c) {
+                case '"' -> inString = true;
+                case '{', '[' -> open.push(c);
+                case '}', ']' -> {
+                    char opener = c == '}' ? '{' : '[';
+                    if (!open.contains(opener)) continue; // stray closer
+                    while (open.peek() != opener) out.append(open.pop() == '{' ? '}' : ']');
+                    open.pop();
+                }
+                default -> { }
+            }
+            out.append(c);
+        }
+        if (inString) out.append('"');
+        while (!open.isEmpty()) out.append(open.pop() == '{' ? '}' : ']');
+        return out.toString();
     }
 
     private static String escape(String s) {

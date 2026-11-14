@@ -29,6 +29,8 @@ public class ModelGateway {
     /** Rate-limited calls are retried this many times, waiting what the provider asks (small plans: Groq, OpenRouter). */
     private static final int RATE_LIMIT_RETRIES = 4;
     private static final long MAX_WAIT_SECONDS = 60;
+    /** Models a call may move through when its own is out of quota, before it waits. */
+    private static final int MAX_HOPS = 3;
     /** Below this, a request shrunk to fit the provider's per-minute limit could not produce a useful answer. */
     private static final long MIN_OUTPUT_TOKENS = 512;
     private static final Pattern LIMIT = Pattern.compile("Limit (\\d+),(?: Used \\d+,)? Requested (\\d+)");
@@ -49,9 +51,11 @@ public class ModelGateway {
     private final EventPublisher events;
     private final TransactionTemplate tx;
     private final org.springframework.jdbc.core.simple.JdbcClient jdbc;
+    private final ModelRouter router;
 
     ModelGateway(ProviderService providers, PricingService pricing, BudgetService budgets, EventPublisher events,
-                 TransactionTemplate tx, org.springframework.jdbc.core.simple.JdbcClient jdbc) {
+                 TransactionTemplate tx, org.springframework.jdbc.core.simple.JdbcClient jdbc, ModelRouter router) {
+        this.router = router;
         this.providers = providers;
         this.pricing = pricing;
         this.budgets = budgets;
@@ -66,6 +70,105 @@ public class ModelGateway {
         if (request.tier() == ModelRequest.Tier.LIGHT && provider.economyModel() != null) {
             request = request.withModel(provider.economyModel());
         }
+        // A model out of quota (or a provider out of credits) does not stop the work: the call moves to the best
+        // other model for the same kind of work, chosen by the router (docs/15). It comes back once the quota resets.
+        ModelProfiles.Need need = request.effectiveNeed();
+        double primary = ModelProfiles.profile(request.model()).score(need);
+        double floor = need == ModelProfiles.Need.LIGHT ? 3 : Math.max(Math.min(ModelRouter.FLOOR, primary), primary - 3);
+        java.util.Set<String> tried = new java.util.HashSet<>();
+        ModelCallException last = null;
+        for (int hop = 0; ; hop++) {
+            java.util.Optional<String> away = router.unavailable(provider.id(), request.model());
+            if (away.isEmpty()) {
+                try {
+                    return completeOn(provider, request);
+                } catch (ModelCallException e) {
+                    java.time.Duration out = unavailableFor(e);
+                    if (out == null) throw e;
+                    boolean wholeProvider = e.statusCode() == 401 || e.statusCode() == 402 || e.statusCode() == 403;
+                    if (!out.isZero()) {
+                        router.markExhausted(provider.id(), wholeProvider ? null : request.model(), out, reasonOf(e));
+                    }
+                    last = e;
+                }
+            }
+            tried.add(provider.id() + "|" + request.model());
+            if (hop >= MAX_HOPS) break;
+            long context = request.promptTokensEstimate() + Math.min(request.maxTokens(), 4_096);
+            var ranking = router.ranking(request.workspaceId(), need, (p, m) -> tried.contains(p + "|" + m), context, null, floor);
+            if (ranking.isEmpty()) {
+                log.info("{} {} unavailable: no other model fits {} work (floor {}, context {} tokens, candidates {}; best below the floor: {})",
+                        provider.name(), request.model(), need, floor, context, router.candidates(request.workspaceId()).stream()
+                                .collect(java.util.stream.Collectors.groupingBy(c -> c.provider().name()
+                                        + (router.unavailable(c.provider().id(), c.info().id()).isPresent() ? " (out)" : ""),
+                                        java.util.stream.Collectors.counting())),
+                        router.ranking(request.workspaceId(), need, (p, m) -> tried.contains(p + "|" + m), context, null, 0)
+                                .stream().limit(4).map(c -> String.format(java.util.Locale.ROOT, "%s %.1f", c.model(), c.score())).toList());
+                break;
+            }
+            ModelRouter.Choice to = ranking.getFirst();
+            String why = last != null ? reasonOf(last) : away.orElse("out of quota");
+            log.info("{} {} unavailable ({}): moved to {} {} [{}]; next: {}", provider.name(), request.model(), why,
+                    to.providerName(), to.model(), to.reason(), ranking.stream().skip(1).limit(3)
+                            .map(c -> String.format(java.util.Locale.ROOT, "%s %.1f", c.model(), c.score())).toList());
+            Provider from = provider;
+            ModelRequest fromReq = request;
+            tx.executeWithoutResult(st -> {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("fromProvider", from.name());
+                payload.put("fromModel", fromReq.model());
+                payload.put("toProvider", to.providerName());
+                payload.put("toModel", to.model());
+                payload.put("reason", why);
+                payload.put("choice", to.reason());
+                if (fromReq.agentId() != null) payload.put("agentId", fromReq.agentId());
+                events.publish(fromReq.workspaceId(), fromReq.projectId(), "model.rerouted",
+                        fromReq.agentId() == null ? Actor.system() : Actor.agent(fromReq.agentId()),
+                        fromReq.agentId() == null ? new Subject("provider", from.id()) : new Subject("agent", fromReq.agentId()),
+                        payload);
+            });
+            provider = providers.find(request.workspaceId(), to.providerId()).orElseThrow();
+            request = request.withProvider(to.providerId(), to.model());
+        }
+        if (last != null) throw last;
+        // The bound model is known to be out and nothing else fits: the job waits, as before routing existed.
+        throw new ModelCallException(provider.name() + " " + request.model() + " is unavailable ("
+                + router.unavailable(provider.id(), request.model()).orElse("out of quota")
+                + ") and no other configured model fits this work: the work waits and resumes by itself.", 429, null,
+                Math.max(60, router.secondsUntilAvailable(provider.id(), request.model())));
+    }
+
+    /**
+     * How long a failed call's model (or provider: credits, key) is out of service. ZERO: move this call only (it is
+     * too large for the model's per-minute limit); null: not a reason to move (a bad request, a network error).
+     */
+    static java.time.Duration unavailableFor(ModelCallException e) {
+        String m = e.getMessage() == null ? "" : e.getMessage();
+        int status = e.statusCode();
+        if (status == 429 && e.retryAfterSeconds() > 0) return java.time.Duration.ofSeconds(e.retryAfterSeconds());
+        if (status == 402 || status == 401 || status == 403) return java.time.Duration.ofHours(1);
+        if (status == 404 || (status == 400 && (m.contains("decommissioned") || m.contains("model_not_found")
+                || m.contains("does not exist")))) {
+            return java.time.Duration.ofHours(24);
+        }
+        if ((status == 413 || status == 429) && (m.contains("per minute") || m.contains("larger than"))) {
+            return java.time.Duration.ZERO;
+        }
+        if (status == 429) return java.time.Duration.ofMinutes(1);
+        return null;
+    }
+
+    private static String reasonOf(ModelCallException e) {
+        String m = e.getMessage() == null ? "" : e.getMessage();
+        if (e.statusCode() == 429 && m.contains("daily")) return "daily quota reached";
+        if (e.statusCode() == 402) return "credits exhausted";
+        if (e.statusCode() == 401 || e.statusCode() == 403) return "key refused";
+        if (e.statusCode() == 404 || e.statusCode() == 400) return "model not available";
+        if (m.contains("per minute")) return "request too large for its per-minute limit";
+        return "rate limited";
+    }
+
+    private ModelResult completeOn(Provider provider, ModelRequest request) {
         Long cap = outputCaps.get(provider.id() + "|" + request.model());
         if (cap != null && request.maxTokens() > cap) request = request.withMaxTokens(cap);
         ModelRequest req = request;
@@ -81,7 +184,8 @@ public class ModelGateway {
             if (hit.isPresent()) {
                 String[] h = hit.get();
                 record(req, provider, h[1], 0, 0, 0, 0, BigDecimal.ZERO, 0, "REUSED", null);
-                return new ModelResult(h[0], h[1], 0, 0, false, h[2], 0, BigDecimal.ZERO, 0, 0, true, req.projectId(), hash);
+                return new ModelResult(h[0], h[1], 0, 0, false, h[2], 0, BigDecimal.ZERO, 0, 0, true, req.projectId(), hash,
+                        provider.id());
             }
         }
 
@@ -134,16 +238,24 @@ public class ModelGateway {
         }
         return new ModelResult(result.text(), result.servedModel(), result.inputTokens(), result.outputTokens(),
                 result.refused(), result.stopReason(), latency, cost, result.cacheWriteTokens(), result.cacheReadTokens(), false,
-                req.projectId(), hash);
+                req.projectId(), hash, provider.id());
     }
 
     /**
-     * What to do after a rate-limit answer (429/413): the same request after the wait the provider asks, or a smaller
+     * What to do after a rate-limit answer (429/413) or no answer at all (network): the same request after the wait the provider asks, or a smaller
      * one when it is larger than the per-minute limit itself. Null: not a rate limit, or nothing can make it fit.
      */
     ModelRequest afterRateLimit(Provider provider, ModelRequest request, ModelCallException e, int attempt, long[] lastRequested) {
         String message = e.getMessage() == null ? "" : e.getMessage();
         String key = provider.id() + "|" + request.model();
+        if (e.statusCode() == 0 && e.getCause() != null) {
+            // No answer at all (timeout, connection reset): a network blip, waited out like a rate limit.
+            // Status 0 without a cause is a configuration or protocol error: retrying cannot help.
+            long wait = 5L << attempt; // 5, 10, 20, 40 s
+            log.info("{} {}: provider unreachable, retrying in {} s (attempt {})", provider.name(), request.model(), wait, attempt + 1);
+            sleep(wait * 1000);
+            return request;
+        }
         Matcher modelMax = MODEL_MAX.matcher(message);
         if (e.statusCode() == 400 && modelMax.find()) {
             long max = Long.parseLong(modelMax.group(1));
@@ -233,6 +345,12 @@ public class ModelGateway {
             Thread.currentThread().interrupt();
             throw new ModelCallException("Interrupted while waiting for the provider's rate limit", 429, ie);
         }
+    }
+
+    /** Whether the caller could use the answer (parsed, valid): the router learns which models break their replies. */
+    public void noteReply(String workspaceId, ModelResult result, boolean usable) {
+        if (result == null || result.reused()) return;
+        router.noteReply(workspaceId, result.providerId(), result.servedModel(), usable);
     }
 
     /** Drops a memoized answer the caller could not use, so a retry asks the model again. */

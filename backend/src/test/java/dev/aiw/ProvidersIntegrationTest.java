@@ -100,4 +100,98 @@ class ProvidersIntegrationTest {
         JsonNode providers = api.get("/api/v1/workspaces/" + ws + "/providers").json();
         assertThat(providers.findValues("isDefault").stream().filter(JsonNode::asBoolean).count()).isEqualTo(1);
     }
+
+    /**
+     * CTO requirement 2026-11-14 (docs/15): a model out of its daily quota does not stop the work. The call moves to
+     * the best other model for the same kind of work, and the next calls go there directly until the quota resets.
+     */
+    @Test
+    void aCallMovesToAnotherModelWhenItsDailyQuotaIsReached() throws Exception {
+        stub.models = """
+                {"object":"list","data":[
+                  {"id":"openai/gpt-oss-120b","context_window":131072},
+                  {"id":"moonshotai/kimi-k2-instruct-0905","context_window":262144},
+                  {"id":"llama-3.1-8b-instant","context_window":131072},
+                  {"id":"whisper-large-v3","context_window":448}]}
+                """;
+        TestApi api = new TestApi(port);
+        api.register("cto-routing");
+        String ws = api.post("/api/v1/workspaces", Map.of("name", "Routing")).json().get("id").asString();
+        String project = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "P")).json().get("id").asString();
+        api.post("/api/v1/workspaces/" + ws + "/providers",
+                new HashMap<>(Map.of("preset", "ollama", "name", "Local", "baseUrl", stub.baseUrl() + "/v1")));
+        String leadId = api.get("/api/v1/projects/" + project + "/agents").json().get(0).get("id").asString();
+
+        // The CTO hands the choice to the platform: the Lead decides and reviews, so the best reasoning model.
+        JsonNode lead = api.post("/api/v1/agents/" + leadId + "/model/auto", Map.of()).json();
+        assertThat(lead.get("model").asString()).isEqualTo("openai/gpt-oss-120b");
+        assertThat(lead.get("modelReason").asString()).contains("reasoning");
+
+        // Groq's daily quota answer for that model: the call moves instead of waiting 27 minutes.
+        stub.openAiErrors.add(new Object[] {429, """
+                {"error":{"message":"Rate limit reached for model `openai/gpt-oss-120b` in organization `org` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199500, Requested 2100. Please try again in 27m0s.","type":"tokens","code":"rate_limit_exceeded"}}
+                """});
+        int before = stub.requests.size();
+        assertThat(lastReply(api, leadId, "Hello?", 2)).isEqualTo("Hello from stub");
+        java.util.List<String> models = stub.requests.subList(before, stub.requests.size()).stream()
+                .filter(r -> r.path().endsWith("/chat/completions"))
+                .map(r -> TestApi.JSON.readTree(r.body()).get("model").asString()).toList();
+        assertThat(models).containsExactly("openai/gpt-oss-120b", "moonshotai/kimi-k2-instruct-0905");
+
+        // The next call goes straight to the replacement: the exhausted model is not asked again.
+        before = stub.requests.size();
+        assertThat(lastReply(api, leadId, "Again?", 4)).isEqualTo("Hello from stub");
+        assertThat(stub.requests.subList(before, stub.requests.size()).stream()
+                .filter(r -> r.path().endsWith("/chat/completions"))
+                .map(r -> TestApi.JSON.readTree(r.body()).get("model").asString()).toList())
+                .containsExactly("moonshotai/kimi-k2-instruct-0905");
+        // The agent keeps its own model: it comes back to it once the quota resets.
+        assertThat(api.get("/api/v1/agents/" + leadId).json().get("model").asString()).isEqualTo("openai/gpt-oss-120b");
+    }
+
+    /** Seen live on 2026-11-14: Groq out of daily quota, OpenRouter out of credits; the call must end on Groq's next best. */
+    @Test
+    void aProviderWithoutCreditsIsSkippedForTheNextBestModel() throws Exception {
+        try (StubModelServer groq = new StubModelServer(); StubModelServer openrouter = new StubModelServer()) {
+            groq.models = """
+                    {"object":"list","data":[{"id":"openai/gpt-oss-120b","active":true,"context_window":131072},
+                      {"id":"moonshotai/kimi-k2-instruct-0905","active":true,"context_window":262144}]}
+                    """;
+            openrouter.models = """
+                    {"data":[{"id":"openai/gpt-5.6-luna","context_length":400000,"pricing":{"prompt":"0.0000002","completion":"0.0000008"}}]}
+                    """;
+            TestApi api = new TestApi(port);
+            api.register("cto-credits");
+            String ws = api.post("/api/v1/workspaces", Map.of("name", "Credits")).json().get("id").asString();
+            String project = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "P")).json().get("id").asString();
+            String g = api.post("/api/v1/workspaces/" + ws + "/providers",
+                    new HashMap<>(Map.of("preset", "ollama", "name", "Groq", "baseUrl", groq.baseUrl() + "/v1"))).json().get("id").asString();
+            api.post("/api/v1/workspaces/" + ws + "/providers",
+                    new HashMap<>(Map.of("preset", "lmstudio", "name", "OpenRouter", "baseUrl", openrouter.baseUrl() + "/v1")));
+            String leadId = api.get("/api/v1/projects/" + project + "/agents").json().get(0).get("id").asString();
+            api.put("/api/v1/agents/" + leadId + "/model", Map.of("providerId", g, "model", "openai/gpt-oss-120b"));
+
+            groq.openAiErrors.add(new Object[] {429, """
+                    {"error":{"message":"Rate limit reached for model `openai/gpt-oss-120b` on tokens per day (TPD): Limit 200000, Used 199500, Requested 2100. Please try again in 27m0s.","code":"rate_limit_exceeded"}}
+                    """});
+            openrouter.openAiErrors.add(new Object[] {402, """
+                    {"error":{"message":"Insufficient credits. This account never purchased credits.","code":402}}
+                    """});
+            assertThat(lastReply(api, leadId, "Hello?", 2)).isEqualTo("Hello from stub");
+            assertThat(groq.requests.stream().filter(r -> r.path().endsWith("/chat/completions"))
+                    .map(r -> TestApi.JSON.readTree(r.body()).get("model").asString()).toList())
+                    .containsExactly("openai/gpt-oss-120b", "moonshotai/kimi-k2-instruct-0905");
+        }
+    }
+
+    private static String lastReply(TestApi api, String agentId, String content, int expected) throws Exception {
+        api.post("/api/v1/agents/" + agentId + "/messages", Map.of("content", content));
+        long deadline = System.currentTimeMillis() + 20_000;
+        JsonNode messages;
+        do {
+            Thread.sleep(150);
+            messages = api.get("/api/v1/agents/" + agentId + "/messages").json();
+        } while (messages.size() < expected && System.currentTimeMillis() < deadline);
+        return messages.get(messages.size() - 1).get("content").asString();
+    }
 }

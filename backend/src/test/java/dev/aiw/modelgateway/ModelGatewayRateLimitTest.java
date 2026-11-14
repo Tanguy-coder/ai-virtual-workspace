@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test;
 
 /** Reading of real provider limit answers (Groq, OpenRouter), without network or waits. */
 class ModelGatewayRateLimitTest {
-    private final ModelGateway gateway = new ModelGateway(null, null, null, null, null, null) {
+    private final ModelGateway gateway = new ModelGateway(null, null, null, null, null, null, null) {
         @Override void sleep(long ms) {}
     };
     private final Provider groq = new Provider("p1", "w1", ProviderKind.OPENAI_COMPATIBLE, "Groq", "https://api.groq.com/openai/v1",
@@ -63,5 +63,16 @@ class ModelGatewayRateLimitTest {
                 });
         assertThatThrownBy(() -> gateway.afterRateLimit(groq, request(2_000), error(429, "per day: Please try again in 1h2m3s."), 0, last))
                 .isInstanceOfSatisfying(ModelCallException.class, e -> assertThat(e.retryAfterSeconds()).isEqualTo(3_723));
+    }
+
+    /** Groq timing out or resetting the connection (seen on T-3): the same request again after a wait. */
+    @Test
+    void aNetworkErrorIsRetried() {
+        ModelRequest same = request(1_000);
+        ModelCallException blip = new ModelCallException("Could not reach the provider: HTTP connect timed out", 0,
+                new java.net.SocketTimeoutException("connect timed out"));
+        assertThat(gateway.afterRateLimit(groq, same, blip, 0, new long[] {-1})).isSameAs(same);
+        ModelCallException config = new ModelCallException("This provider has no base URL configured", 0, null);
+        assertThat(gateway.afterRateLimit(groq, same, config, 0, new long[] {-1})).isNull();
     }
 }

@@ -26,6 +26,10 @@ public class StubModelServer implements AutoCloseable {
     /** Content the OpenAI-compatible endpoint answers for a given request body. */
     public volatile Function<String, String> openAiResponder = body -> "Hello from stub";
     /** Error answers {status, body} the OpenAI-compatible endpoint gives first, one per request (rate limits...). */
+    /** What GET /v1/models answers. */
+    public volatile String models = """
+            {"object":"list","data":[{"id":"stub-large","object":"model"},{"id":"models/stub-small","object":"model"}]}
+            """;
     public final java.util.Queue<Object[]> openAiErrors = new java.util.concurrent.ConcurrentLinkedQueue<>();
 
     public StubModelServer() throws IOException {
@@ -53,9 +57,7 @@ public class StubModelServer implements AutoCloseable {
                 """.formatted(TestApi.JSON.writeValueAsString(answer));
             });
         });
-        server.createContext("/v1/models", ex -> respond(ex, body -> """
-                {"object":"list","data":[{"id":"stub-large","object":"model"},{"id":"models/stub-small","object":"model"}]}
-                """));
+        server.createContext("/v1/models", ex -> respond(ex, body -> models));
         server.createContext("/v1/messages", ex -> respond(ex, body -> """
                 {"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5",
                  "content":[{"type":"text","text":%s}],"stop_reason":"end_turn","stop_sequence":null,

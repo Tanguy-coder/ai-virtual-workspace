@@ -68,7 +68,8 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
     case "project.created": return `Project "${p.name}" created`;
     case "document.added": return `Document "${p.title}" added`;
     case "agent.hired": return `${p.name} joined as ${p.title}`;
-    case "agent.model_bound": return `${agent} now uses ${p.model}`;
+    case "agent.model_bound": return p.source === "LEAD" ? `The Lead gave ${agent} ${p.model} (${p.reason})`
+      : p.source === "SYSTEM" ? `${agent} now uses ${p.model} (${p.reason})` : `${agent} now uses ${p.model}`;
     case "agent.department_changed": return `${agent} moved from ${String(p.from).toLowerCase()} to ${String(p.to).toLowerCase()}`;
     case "role_template.created": return `New role "${p.title}" added to the catalog`;
     case "agent.instructions_updated": return `${agent}'s instructions were edited`;
@@ -88,6 +89,7 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
       return `${p.model} call ${String(p.outcome).toLowerCase()} · ${p.inputTokens} in / ${p.outputTokens} out` +
         (Number(p.cacheReadTokens) > 0 ? ` · ${p.cacheReadTokens} from cache` : "") +
         (p.costUsd ? ` · $${Number(p.costUsd).toFixed(4)}` : " · unpriced") + ` · ${p.latencyMs} ms`;
+    case "model.rerouted": return `${p.fromModel} unavailable (${p.reason}): ${p.agentId ? who(p.agentId) + "'s call" : "the call"} moved to ${p.toModel}${p.toProvider !== p.fromProvider ? ` on ${p.toProvider}` : ""}`;
     case "budget.threshold_reached": return `Budget ${p.limit} limit at ${p.threshold} ($${p.spentUsd} of $${p.limitUsd})`;
     case "provider.created": return `Provider "${p.name}" added`;
     case "provider.deleted": return `Provider "${p.name}" removed`;
@@ -106,7 +108,8 @@ export function tone(e: EventRecord): "danger" | "warn" | "ok" | "muted" {
   if (e.type === "message.failed" || e.payload.outcome === "ERROR" || e.type.endsWith(".failed") || e.type === "task.blocked") return "danger";
   if (e.type === "hiring_proposal.created" || e.type === "briefing.analyzed") return "warn";
   if (e.type === "plan.created" || e.type === "meeting.minutes_published" || e.type === "hiring_proposal.accepted") return "ok";
-  if (e.type.startsWith("budget.") || e.type === "approval.requested" || e.type === "job.deferred") return "warn";
+  if (e.type.startsWith("budget.") || e.type === "approval.requested" || e.type === "job.deferred"
+    || e.type === "model.rerouted") return "warn";
   if (e.type === "agent.hired" || e.type === "approval.granted") return "ok";
   return "muted";
 }

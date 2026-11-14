@@ -21,6 +21,8 @@ export interface Agent {
   department: Department; seniority: string; simulatedYears: number; skills: string[]; responsibilities: string[];
   systemInstructions: string; providerId: string | null; model: string | null; lead: boolean;
   status: "ACTIVE" | "PAUSED" | "DISMISSED"; activity: string; blockedReason: string | null; createdAt: string;
+  /** Who chose the model (docs/15): the CTO, the Lead, or the platform; and why, when it was not the CTO. */
+  modelSource: "CTO" | "LEAD" | "SYSTEM" | null; modelReason: string | null;
 }
 export interface AgentMessage {
   id: string; agentId: string; authorKind: "HUMAN" | "AGENT"; authorId: string; content: string;

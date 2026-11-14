@@ -20,8 +20,13 @@ class SandboxNetworkTest {
         Files.writeString(dir.resolve("package.json"), """
                 {"name": "net-check", "version": "1.0.0", "scripts": {"preinstall": "%s"}}""".formatted(LOOKUP));
         SandboxService sandboxes = new SandboxService(true, "1", "512m", 120, dir.getParent().toString(), "");
-        String id = sandboxes.ensure("net-test-" + System.nanoTime(), null, dir, "node:22-bookworm-slim");
+        String runId = "net-test-" + System.nanoTime();
+        String id = sandboxes.ensure(runId, null, dir, "node:22-bookworm-slim");
         try {
+            // Another platform on the same Docker daemon (here: another data dir) must not see it, so never cleans it up.
+            assertThat(sandboxes.running()).containsKey(runId);
+            Path elsewhere = Files.createTempDirectory("aiw-sandbox-other");
+            assertThat(new SandboxService(true, "1", "512m", 120, elsewhere.toString(), "").running()).doesNotContainKey(runId);
             SandboxService.Command install = sandboxes.exec(id, "npm install", Duration.ofMinutes(2));
             assertThat(install.output()).contains("NET-UP");
             SandboxService.Command after = sandboxes.exec(id, LOOKUP.replace("\\\"", "\""), Duration.ofSeconds(30));

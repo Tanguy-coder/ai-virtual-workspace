@@ -46,6 +46,7 @@ class ExecutionIntegrationTest {
     static void dataDir(DynamicPropertyRegistry r) throws Exception {
         dataDir = Files.createTempDirectory("aiw-exec-test");
         r.add("aiw.data-dir", () -> dataDir.toString());
+        r.add("aiw.sandbox.stop-on-shutdown", () -> "true");
     }
 
     @BeforeAll

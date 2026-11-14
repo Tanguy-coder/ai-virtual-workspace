@@ -46,6 +46,7 @@ class RealignmentIntegrationTest {
     static void dataDir(DynamicPropertyRegistry r) throws Exception {
         dataDir = Files.createTempDirectory("aiw-realign-test");
         r.add("aiw.data-dir", () -> dataDir.toString());
+        r.add("aiw.sandbox.stop-on-shutdown", () -> "true");
     }
 
     @BeforeAll

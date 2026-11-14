@@ -88,6 +88,16 @@ class AgentController {
         return agents.updateModel(agentId, currentUser(agentId), body.providerId(), body.model());
     }
 
+    /** The CTO hands the choice back: the Lead picks the model that fits this agent's mission (docs/15). */
+    @PostMapping("/api/v1/agents/{agentId}/model/auto")
+    Agent autoModel(@PathVariable String agentId) {
+        load(agentId, WorkspaceRole.MEMBER);
+        if (!agents.assignModel(agentId, true)) {
+            throw dev.aiw.shared.ApiException.conflict("no_model", "No provider offers a usable model yet: add a provider with its key first");
+        }
+        return agents.find(agentId).orElseThrow();
+    }
+
     record DepartmentChange(@jakarta.validation.constraints.NotNull Department department) {}
 
     @PutMapping("/api/v1/agents/{agentId}/department")

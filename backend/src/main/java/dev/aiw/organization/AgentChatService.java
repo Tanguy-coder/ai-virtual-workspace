@@ -152,7 +152,7 @@ public class AgentChatService {
             // Stable system prompt and cached conversation: each reply re-reads the history from the provider cache.
             result = gateway.complete(new ModelRequest(agent.workspaceId(), agent.projectId(), agentId, agent.providerId(),
                     agent.model(), systemPrompt(agent) + (lead == null ? "" : "\n" + lead.manual()), null, turns, MAX_TOKENS,
-                    "medium", ModelRequest.Tier.STANDARD, ModelRequest.Cache.CONVERSATION));
+                    "medium", ModelRequest.Tier.STANDARD, ModelRequest.Cache.CONVERSATION, agent.need()));
         } catch (ModelCallException | ApiException e) {
             agents.endThinking(agentId);
             fail(agent, pendingIds, e.getMessage());

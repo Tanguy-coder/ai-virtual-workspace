@@ -35,6 +35,14 @@ public class SandboxService {
     private final Path dataDir;
     /** Named volume holding the data dir (platform running in Docker), or null: worktrees are host paths. */
     private final String dataVolume;
+    /**
+     * Which installation owns a sandbox: several platforms (the Docker one, a dev run, test contexts) can share one
+     * Docker daemon, and each must only clean up its own containers. Derived from where its worktrees live.
+     */
+    private final String owner;
+    /** Remove this platform's sandboxes when it stops (tests). In production they outlive a restart: runs resume in them. */
+    @Value("${aiw.sandbox.stop-on-shutdown:false}")
+    private boolean stopOnShutdown;
 
     SandboxService(@Value("${aiw.sandbox.enabled:true}") boolean enabled, @Value("${aiw.sandbox.cpus:1}") String cpus,
                    @Value("${aiw.sandbox.memory:1g}") String memory,
@@ -43,6 +51,7 @@ public class SandboxService {
         this.enabled = enabled;
         this.dataDir = Path.of(dataDir).toAbsolutePath().normalize();
         this.dataVolume = dataVolume == null || dataVolume.isBlank() ? null : dataVolume.strip();
+        this.owner = Integer.toHexString(((this.dataVolume == null ? "" : this.dataVolume) + "|" + this.dataDir).hashCode());
         this.cpus = cpus;
         this.memory = memory;
         this.commandTimeout = Duration.ofSeconds(timeoutSeconds);
@@ -89,7 +98,7 @@ public class SandboxService {
             if (!pull.ok()) throw new SandboxException("Could not pull image " + image + ": " + pull.combined().strip());
         }
         List<String> cmd = new ArrayList<>(List.of("docker", "run", "-d", "--rm", "--name", "aiw-run-" + runId.toLowerCase() + "-" + System.nanoTime() % 100000,
-                "--label", "aiw.run=" + runId, "--network", "none", "--cpus", cpus, "--memory", memory,
+                "--label", "aiw.run=" + runId, "--label", "aiw.owner=" + owner, "--network", "none", "--cpus", cpus, "--memory", memory,
                 "--pids-limit", "512", "--security-opt", "no-new-privileges", "-e", "HOME=/tmp", "-e", "CI=true",
                 "-e", "npm_config_cache=/tmp/.npm", "--mount", mount(worktree), "-w", "/work"));
         if (user != null) {
@@ -142,12 +151,20 @@ public class SandboxService {
         if (!r.ok()) log.debug("Sandbox {} already gone: {}", containerId, r.combined());
     }
 
-    /** Sandboxes of this platform: run id → container id (short). */
+    @jakarta.annotation.PreDestroy
+    void shutdown() {
+        if (stopOnShutdown) running().values().forEach(this::stop);
+    }
+
+    /** Sandboxes of this platform (not of another one sharing the Docker daemon): run id → container id (short). */
     public java.util.Map<String, String> running() {
-        Processes.Result r = docker("ps", "-a", "--filter", "label=aiw.run", "--format", "{{.ID}}\t{{.Label \"aiw.run\"}}");
+        Processes.Result r = docker("ps", "-a", "--filter", "label=aiw.run",
+                "--format", "{{.ID}}\t{{.Label \"aiw.run\"}}\t{{.Label \"aiw.owner\"}}");
         java.util.Map<String, String> out = new java.util.HashMap<>();
         if (!r.ok()) return out;
-        r.out().lines().map(l -> l.split("\t")).filter(p -> p.length == 2).forEach(p -> out.put(p[1], p[0]));
+        // No owner label: started before owners existed, so by the platform that has always run here.
+        r.out().lines().map(l -> l.split("\t", -1)).filter(p -> p.length == 3 && (p[2].isEmpty() || p[2].equals(owner)))
+                .forEach(p -> out.put(p[1], p[0]));
         return out;
     }
 

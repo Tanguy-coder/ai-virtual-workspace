@@ -250,6 +250,10 @@ function AgentSettings({ agent, workspaceId }: { agent: Agent; workspaceId: stri
     queryClient.invalidateQueries({ queryKey: ["agents", agent.projectId] });
   };
   const bind = useMutation({ mutationFn: () => api.put(`/api/v1/agents/${agent.id}/model`, { providerId, model }), onSuccess: refresh });
+  const auto = useMutation({
+    mutationFn: () => api.post<Agent>(`/api/v1/agents/${agent.id}/model/auto`, {}),
+    onSuccess: (a) => { setProviderId(a.providerId ?? ""); setModel(a.model ?? ""); refresh(); },
+  });
   const save = useMutation({ mutationFn: () => api.put(`/api/v1/agents/${agent.id}/instructions`, { systemInstructions: instructions }), onSuccess: refresh });
   const status = useMutation({ mutationFn: (s: string) => api.put(`/api/v1/agents/${agent.id}/status`, { status: s }), onSuccess: refresh });
   const dept = useMutation({ mutationFn: (d: Department) => api.put(`/api/v1/agents/${agent.id}/department`, { department: d }), onSuccess: refresh });
@@ -272,8 +276,21 @@ function AgentSettings({ agent, workspaceId }: { agent: Agent; workspaceId: stri
             <datalist id={`agent-models-${agent.id}`}>{providerModels.data?.map((m) => <option key={m} value={m} />)}</datalist>
           </Field>
         </div>
-        <Button variant="ghost" onClick={() => bind.mutate()} disabled={!providerId || !model || bind.isPending}>Apply model</Button>
-        <ErrorText error={bind.error} />
+        {agent.model && agent.modelSource && agent.modelSource !== "CTO" && (
+          <p className="text-[12px] text-muted">
+            {agent.modelSource === "LEAD" ? "Chosen by the Lead" : "Chosen by the platform"}
+            {agent.modelReason ? `: ${agent.modelReason}` : ""}
+          </p>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <Button variant="ghost" onClick={() => bind.mutate()} disabled={!providerId || !model || bind.isPending}>Apply model</Button>
+          <Button variant="subtle" onClick={() => auto.mutate()} disabled={auto.isPending}
+            title="The Lead picks the model that fits this agent's mission among every model your providers offer">
+            {agent.lead ? "Let the platform choose" : "Let the Lead choose"}
+          </Button>
+        </div>
+        <p className="text-[12px] text-faint">When this model is out of quota, calls move to the best other model for the same work and come back once the quota resets.</p>
+        <ErrorText error={bind.error ?? auto.error} />
       </section>
       <section className="space-y-3">
         <h3 className="text-[13px] font-semibold">Department</h3>

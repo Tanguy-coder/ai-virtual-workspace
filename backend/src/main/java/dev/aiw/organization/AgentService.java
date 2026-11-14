@@ -6,6 +6,7 @@ import dev.aiw.governance.AuditLog;
 import dev.aiw.modelgateway.Provider;
 import dev.aiw.modelgateway.DefaultModelChanged;
 import dev.aiw.modelgateway.ProviderKind;
+import dev.aiw.modelgateway.ModelRouter;
 import dev.aiw.modelgateway.ProviderService;
 import dev.aiw.projects.ProjectCreated;
 import dev.aiw.shared.Actor;
@@ -32,8 +33,10 @@ public class AgentService {
     private final EventPublisher events;
     private final AuditLog audit;
     private final ProviderService providers;
+    private final ModelRouter router;
 
-    AgentService(JdbcClient jdbc, EventPublisher events, AuditLog audit, ProviderService providers) {
+    AgentService(JdbcClient jdbc, EventPublisher events, AuditLog audit, ProviderService providers, ModelRouter router) {
+        this.router = router;
         this.jdbc = jdbc;
         this.events = events;
         this.audit = audit;
@@ -91,13 +94,7 @@ public class AgentService {
     public void onDefaultModelChanged(DefaultModelChanged event) {
         List<String> unbound = jdbc.sql("SELECT id FROM agents WHERE workspace_id = ? AND provider_id IS NULL AND status <> 'DISMISSED'")
                 .param(event.workspaceId()).query(String.class).list();
-        for (String agentId : unbound) {
-            jdbc.sql("UPDATE agents SET provider_id = ?, model = ? WHERE id = ?")
-                    .params(event.providerId(), event.model(), agentId).update();
-            Agent a = find(agentId).orElseThrow();
-            events.publish(a.workspaceId(), a.projectId(), "agent.model_bound", Actor.system(), new Subject("agent", agentId),
-                    Map.of("model", event.model()));
-        }
+        for (String agentId : unbound) assignModel(agentId, false);
     }
 
     public record HireOverrides(String name, Department department, String seniority, Integer simulatedYears,
@@ -126,7 +123,8 @@ public class AgentService {
         Provider provider = providers.find(agent.workspaceId(), providerId)
                 .orElseThrow(() -> ApiException.badRequest("provider_missing", "Unknown provider"));
         if (model == null || model.isBlank()) throw ApiException.badRequest("model_required", "A model is required");
-        jdbc.sql("UPDATE agents SET provider_id = ?, model = ? WHERE id = ?").params(provider.id(), model.trim(), agentId).update();
+        jdbc.sql("UPDATE agents SET provider_id = ?, model = ?, model_source = 'CTO', model_reason = NULL WHERE id = ?")
+                .params(provider.id(), model.trim(), agentId).update();
         Actor actor = Actor.human(userId);
         events.publish(agent.workspaceId(), agent.projectId(), "agent.model_bound", actor, new Subject("agent", agentId),
                 Map.of("provider", provider.name(), "model", model.trim()));
@@ -271,7 +269,6 @@ public class AgentService {
                          String seniority, int years, List<String> skills, List<String> responsibilities, boolean lead,
                          Actor actor) {
         String id = Ids.newId();
-        Optional<Provider> provider = providers.defaultProvider(workspaceId);
         jdbc.sql("""
                 INSERT INTO agents (id, workspace_id, project_id, role_template_id, name, title, department, seniority,
                                     simulated_years, skills, responsibilities, system_instructions, provider_id, model,
@@ -280,14 +277,51 @@ public class AgentService {
                 """).params(id, workspaceId, projectId, t.id(), name, title, t.department().name(), seniority, years,
                         skills.toArray(String[]::new), responsibilities.toArray(String[]::new),
                         AgentInstructions.build(name, title, seniority, years, skills, responsibilities, lead),
-                        provider.map(Provider::id).orElse(null),
-                        provider.map(Provider::defaultModel).orElse(null), lead)
+                        null, null, lead)
                 .update();
         events.publish(workspaceId, projectId, "agent.hired", actor, new Subject("agent", id),
                 Map.of("name", name, "title", title, "department", t.department().name(), "lead", lead));
         audit.record(workspaceId, actor, "agent.hire", "agent", id, AuditLog.Decision.RECORDED,
                 Map.of("name", name, "title", title, "templateId", t.id()));
+        assignModel(id, false);
         return find(id).orElseThrow();
+    }
+
+    /**
+     * Gives the agent the model that fits its mission best among every model the workspace's providers offer
+     * (docs/15): coding for engineers, reasoning for the Lead, architects, product and security. Agents already on a
+     * model weigh against it, so a team spreads over several daily quotas. The Lead makes the choice when the project
+     * has one (it is the Lead's team), the platform otherwise. {@code replace}: also for an agent that has a model.
+     * Returns false when no provider offers a usable model yet; the agent is bound once one does.
+     */
+    @Transactional
+    public boolean assignModel(String agentId, boolean replace) {
+        Agent agent = find(agentId).orElseThrow(() -> ApiException.notFound("Agent"));
+        if (agent.model() != null && !replace) return true;
+        var choice = router.best(agent.workspaceId(), agent.need(), null, 16_000, router.load(agent.workspaceId(), agentId), 0);
+        String providerId, model, reason;
+        if (choice.isPresent()) {
+            providerId = choice.get().providerId();
+            model = choice.get().model();
+            reason = choice.get().reason();
+        } else {
+            Optional<Provider> fallback = providers.defaultProvider(agent.workspaceId()).filter(p -> p.defaultModel() != null);
+            if (fallback.isEmpty()) return false;
+            providerId = fallback.get().id();
+            model = fallback.get().defaultModel();
+            reason = "the workspace default (its provider could not list its models)";
+        }
+        Optional<Agent> lead = agent.lead() ? Optional.empty() : lead(agent.projectId());
+        Actor actor = lead.map(l -> Actor.agent(l.id())).orElse(Actor.system());
+        String source = lead.isPresent() ? "LEAD" : "SYSTEM";
+        jdbc.sql("UPDATE agents SET provider_id = ?, model = ?, model_source = ?, model_reason = ? WHERE id = ?")
+                .params(providerId, model, source, reason, agentId).update();
+        String providerName = providers.find(agent.workspaceId(), providerId).map(Provider::name).orElse("");
+        events.publish(agent.workspaceId(), agent.projectId(), "agent.model_bound", actor, new Subject("agent", agentId),
+                Map.of("provider", providerName, "model", model, "source", source, "reason", reason));
+        audit.record(agent.workspaceId(), actor, "agent.bind_model", "agent", agentId, AuditLog.Decision.RECORDED,
+                Map.of("providerId", providerId, "model", model, "reason", reason));
+        return true;
     }
 
     private String nextName(String projectId, String title) {
@@ -322,6 +356,7 @@ public class AgentService {
                 strings(rs.getArray("skills")), strings(rs.getArray("responsibilities")),
                 rs.getString("system_instructions"), rs.getString("provider_id"), rs.getString("model"),
                 rs.getBoolean("is_lead"), rs.getString("status"), rs.getString("activity"),
-                rs.getString("blocked_reason"), rs.getTimestamp("created_at").toInstant());
+                rs.getString("blocked_reason"), rs.getTimestamp("created_at").toInstant(), rs.getString("model_source"),
+                rs.getString("model_reason"));
     }
 }

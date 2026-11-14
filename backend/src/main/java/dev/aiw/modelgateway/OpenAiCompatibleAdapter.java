@@ -104,6 +104,11 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
 
     @Override
     public List<String> listModels(String providerId, String baseUrl, String apiKey) {
+        return listModelInfo(providerId, baseUrl, apiKey).stream().map(ModelInfo::id).toList();
+    }
+
+    @Override
+    public List<ModelInfo> listModelInfo(String providerId, String baseUrl, String apiKey) {
         if (baseUrl == null || baseUrl.isBlank()) {
             throw new ModelCallException("This provider has no base URL configured", 0, null);
         }
@@ -118,13 +123,36 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
         } catch (RestClientException e) {
             throw new ModelCallException("Could not reach the provider: " + e.getMessage(), 0, e);
         }
-        List<String> ids = new ArrayList<>();
-        // OpenAI shape {"data": [{"id": ...}]}; Gemini's compatibility layer prefixes ids with "models/".
+        return parseModels(response);
+    }
+
+    /**
+     * OpenAI shape {"data": [{"id": ...}]}; Gemini's compatibility layer prefixes ids with "models/". The context
+     * window is "context_window" (Groq) or "context_length" (OpenRouter, Together); inactive models are left out.
+     */
+    private static Double perMillion(JsonNode perToken) {
+        if (perToken == null || perToken.isMissingNode() || perToken.isNull()) return null;
+        try {
+            double v = Double.parseDouble(perToken.asString(perToken.toString()));
+            return v < 0 ? null : v * 1_000_000; // OpenRouter uses -1 for routers with variable prices
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    static List<ModelInfo> parseModels(JsonNode response) {
+        java.util.Map<String, ModelInfo> out = new java.util.TreeMap<>();
         for (JsonNode m : response == null ? JSON.createArrayNode() : response.path("data")) {
             String id = m.path("id").asString("");
-            if (!id.isBlank()) ids.add(id.startsWith("models/") ? id.substring("models/".length()) : id);
+            if (id.isBlank() || !m.path("active").asBoolean(true)) continue;
+            if (id.startsWith("models/")) id = id.substring("models/".length());
+            long window = m.path("context_window").asLong(m.path("context_length").asLong(0));
+            // OpenRouter: "pricing": {"prompt": "0.000003", "completion": "0.000015"} in USD per token.
+            JsonNode pricing = m.path("pricing");
+            Double in = perMillion(pricing.path("prompt")), outPrice = perMillion(pricing.path("completion"));
+            out.putIfAbsent(id, new ModelInfo(id, window > 0 ? window : null, outPrice == null ? null : in, in == null ? null : outPrice));
         }
-        return ids.stream().distinct().sorted().toList();
+        return List.copyOf(out.values());
     }
 
     private static String failedToolGeneration(RestClientResponseException e) {
