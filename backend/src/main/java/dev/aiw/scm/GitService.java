@@ -150,6 +150,11 @@ public class GitService {
         return git(dir, "rev-parse", "HEAD").strip();
     }
 
+    /** The commit the branch {@code ref} left {@code base} from. */
+    public String mergeBase(Path dir, String base, String ref) {
+        return git(dir, "merge-base", base, ref).strip();
+    }
+
     public String revParse(Path dir, String ref) {
         return git(dir, "rev-parse", ref).strip();
     }
@@ -283,6 +288,13 @@ public class GitService {
     }
 
     public record Commit(String sha, String author, String date, String subject) {}
+
+    /** The commits of {@code ref} that changed {@code path}, newest first. */
+    public List<Commit> fileHistory(Path dir, String ref, String path, int max) {
+        String out = git(dir, "log", "--max-count=" + max, "--format=%H\t%an\t%aI\t%s", ref, "--", path);
+        return out.lines().map(l -> l.split("\t", 4)).filter(p -> p.length == 4)
+                .map(p -> new Commit(p[0], p[1], p[2], p[3])).toList();
+    }
 
     public List<Commit> log(Path repo, String ref, int max) {
         String out = git(repo, "log", "--max-count=" + max, "--format=%h\t%an\t%aI\t%s", ref);

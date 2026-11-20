@@ -17,11 +17,14 @@ final class TaskSizing {
 
     static String rules(long budget) {
         return """
-                - Make every task as small as possible. Each one is done by one agent in a single run of at most %d tokens \
-                of model calls (about %d tool steps), possibly on a small, cheap model with a short context. If a piece of work \
-                might not fit, split it.
-                - One task = one focused change: a few files (aim for 4 or fewer), its own tests, 1 to 4 acceptance criteria. \
-                A feature becomes several tasks (model, endpoint, UI, ...) linked by dependsOn.
-                - Keep texts terse: description at most 2 sentences, brief at most 1 sentence.""".formatted(budget, steps(budget));
+                - Hard limit: a task never uses more than %d tokens (about %d steps); it is never raised. Plan each task \
+                to need at most HALF of it (about %d tool steps on a small, cheap model with a very short context), so \
+                retries and fixes still fit. A task that reaches the limit is cut into smaller tasks.
+                - Make every task the smallest that still delivers something testable: when a task could be cut into two \
+                tasks that are each testable, cut it.
+                - One task = one behavior: at most 2 source files plus their tests, about 100 changed lines, 1 to 3 \
+                acceptance criteria that a test proves (never more than 3). A feature becomes several tasks (data, logic, \
+                UI, wiring) linked by dependsOn; a task that changes an existing file names it in its description.
+                - Keep texts terse: description at most 2 sentences, brief at most 1 sentence.""".formatted(budget, steps(budget), steps(budget / 2));
     }
 }

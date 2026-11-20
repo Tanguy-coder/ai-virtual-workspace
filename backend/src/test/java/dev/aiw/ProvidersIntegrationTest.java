@@ -145,6 +145,23 @@ class ProvidersIntegrationTest {
                 .filter(r -> r.path().endsWith("/chat/completions"))
                 .map(r -> TestApi.JSON.readTree(r.body()).get("model").asString()).toList())
                 .containsExactly("moonshotai/kimi-k2-instruct-0905");
+        // T-27: a model that refuses max_tokens is asked again with max_completion_tokens, and from then on directly.
+        stub.openAiErrors.add(new Object[] {400, """
+                {"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}
+                """});
+        before = stub.requests.size();
+        assertThat(lastReply(api, leadId, "Reasoning?", 6)).isEqualTo("Hello from stub");
+        java.util.List<String> bodies = stub.requests.subList(before, stub.requests.size()).stream()
+                .filter(r -> r.path().endsWith("/chat/completions")).map(r -> r.body()).toList();
+        assertThat(bodies).hasSize(2);
+        assertThat(bodies.get(0)).contains("\"max_tokens\"");
+        assertThat(bodies.get(1)).contains("\"max_completion_tokens\"").doesNotContain("\"max_tokens\"");
+        before = stub.requests.size();
+        assertThat(lastReply(api, leadId, "Again, reasoning?", 8)).isEqualTo("Hello from stub");
+        assertThat(stub.requests.subList(before, stub.requests.size()).stream()
+                .filter(r -> r.path().endsWith("/chat/completions")).map(r -> r.body()).toList())
+                .allMatch(b -> b.contains("\"max_completion_tokens\""));
+
         // The agent keeps its own model: it comes back to it once the quota resets.
         assertThat(api.get("/api/v1/agents/" + leadId).json().get("model").asString()).isEqualTo("openai/gpt-oss-120b");
     }

@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -72,7 +73,12 @@ public class TaskExecution {
      * allows few tokens per minute (Groq free tier: 8 000), so that a long task still fits in one request.
      */
     record Lean(int historyEntries, int fullOutputs, int outputChars, int newsChars, int specChars, int memoryChars) {}
-    static final Lean NORMAL = new Lean(Integer.MAX_VALUE, FULL_OUTPUTS, Integer.MAX_VALUE, 4_000, 4_000, 3_000);
+    /**
+     * Default for every provider (CTO requirement, 2026-11-18: very small contexts): the last 12 entries, the last 2
+     * outputs in full. Older work is summarized by the state of the repository, which the agent reads when it needs it.
+     */
+    static final Lean NORMAL = new Lean(12, 2, 2_000, 1_500, 1_200, 800);
+    static final Lean TAKEOVER = new Lean(24, 4, 3_000, 2_000, 1_200, 800);
     static final List<Lean> LEAN = List.of(new Lean(20, 3, 2_500, 2_000, 1_500, 1_000),
             new Lean(10, 2, 1_200, 1_200, 600, 400), new Lean(6, 1, 600, 800, 0, 0));
     /** Conservative characters per token when sizing a prompt against a token limit. */
@@ -101,6 +107,9 @@ public class TaskExecution {
     private final boolean autoStart;
     private final int maxSegmentSteps;
     private final long tokenBudget;
+    private final long takeoverTokens;
+    private final long maxTaskTokens;
+    private final int takeoverSteps;
     private final BudgetService budgets;
     private final MeetingService meetings;
     private final BranchFlow branches;
@@ -112,7 +121,13 @@ public class TaskExecution {
                   BudgetService budgets, MeetingService meetings, dev.aiw.modelgateway.ModelGateway gateway, BranchFlow branches,
                   @Value("${aiw.execution.auto-start:true}") boolean autoStart,
                   @Value("${aiw.execution.max-steps-per-segment:40}") int maxSegmentSteps,
-                  @Value("${aiw.execution.token-budget:200000}") long tokenBudget) {
+                  @Value("${aiw.execution.token-budget:200000}") long tokenBudget,
+                  @Value("${aiw.execution.takeover-token-budget:150000}") long takeoverTokens,
+                  @Value("${aiw.execution.takeover-steps:30}") int takeoverSteps,
+                  @Value("${aiw.execution.max-task-tokens:200000}") long maxTaskTokens) {
+        this.maxTaskTokens = maxTaskTokens;
+        this.takeoverTokens = takeoverTokens;
+        this.takeoverSteps = takeoverSteps;
         this.tasks = tasks;
         this.runs = runs;
         this.tools = tools;
@@ -144,7 +159,25 @@ public class TaskExecution {
     /** Tokens given to each new run of the project: the project's setting, else the platform default. */
     public long taskTokenBudget(String projectId) {
         Long own = budgets.get(projectId).taskTokenBudget();
-        return own == null ? tokenBudget : own;
+        return Math.min(own == null ? tokenBudget : own, maxTaskTokens);
+    }
+
+    /**
+     * No task ever uses more tokens than this (CTO requirement, 2026-11-20): budgets are never raised past it; a task
+     * that runs out is split by the Lead into smaller ones that go on from its branch.
+     */
+    public long maxTaskTokens() {
+        return maxTaskTokens;
+    }
+
+    /** Runs opened before the ceiling, or raised past it, are brought back under it. */
+    @EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    void capOpenBudgets() {
+        int capped = jdbc.sql("""
+                UPDATE task_runs SET token_budget = ? WHERE token_budget > ?
+                  AND status IN ('RUNNING', 'PAUSED', 'SUBMITTED', 'BLOCKED')
+                """).params(maxTaskTokens, maxTaskTokens).update();
+        if (capped > 0) log.info("Capped {} open run budget(s) to {} tokens", capped, maxTaskTokens);
     }
 
     // ================================================================== start
@@ -153,6 +186,7 @@ public class TaskExecution {
     @Scheduled(fixedDelayString = "${aiw.execution.sweep-ms:10000}", initialDelayString = "${aiw.execution.sweep-delay-ms:5000}")
     void sweep() {
         if (!autoStart || !sandboxes.enabled()) return;
+        closeFinishedRuns();
         // Tasks still waiting although none of their dependencies is pending any more (all done or cancelled).
         jdbc.sql("""
                 SELECT t.id FROM tasks t WHERE t.status = 'CREATED'
@@ -161,11 +195,27 @@ public class TaskExecution {
                                   WHERE d.task_id = t.id AND x.status NOT IN ('DONE', 'CANCELLED'))
                 """).query(String.class).list()
                 .forEach(id -> tx.executeWithoutResult(s -> tasks.settle(id, Actor.system())));
+        // Blocks the Lead settled while their agent was busy: they resume first, as soon as the agent is free.
+        List<String> waiting = jdbc.sql("""
+                SELECT DISTINCT ON (r.agent_id) r.task_id FROM task_runs r JOIN agents a ON a.id = r.agent_id
+                WHERE r.resume_when_free AND r.status = 'BLOCKED' AND a.status = 'ACTIVE'
+                  AND NOT EXISTS (SELECT 1 FROM task_runs o WHERE o.agent_id = r.agent_id AND o.status IN ('RUNNING', 'PAUSED'))
+                ORDER BY r.agent_id, r.updated_at
+                """).query(String.class).list();
+        for (String taskId : waiting) {
+            try {
+                jdbc.sql("UPDATE task_runs SET resume_when_free = false WHERE task_id = ? AND resume_when_free").param(taskId).update();
+                resume(taskId, Actor.system());
+            } catch (RuntimeException e) {
+                log.warn("Could not resume task {}", taskId, e);
+            }
+        }
         List<String> candidates = jdbc.sql("""
                 SELECT DISTINCT ON (t.assignee_id) t.id FROM tasks t JOIN agents a ON a.id = t.assignee_id
                 WHERE t.status = 'ASSIGNED' AND a.status = 'ACTIVE' AND a.provider_id IS NOT NULL AND a.model IS NOT NULL
                   AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.task_id = t.id AND r.status IN ('RUNNING', 'PAUSED', 'SUBMITTED', 'BLOCKED'))
                   AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.agent_id = a.id AND r.status IN ('RUNNING', 'PAUSED'))
+                  AND NOT EXISTS (SELECT 1 FROM task_runs r WHERE r.agent_id = a.id AND r.resume_when_free)
                   AND NOT EXISTS (SELECT 1 FROM meeting_participants p JOIN meetings m ON m.id = p.meeting_id
                                   WHERE p.agent_id = a.id AND m.status IN ('IN_PROGRESS', 'SYNTHESIZING'))
                 ORDER BY t.assignee_id, CASE t.priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END, t.number
@@ -221,6 +271,9 @@ public class TaskExecution {
         if (!"RUNNING".equals(run.status())) return;
         Task task = tasks.find(run.taskId()).orElseThrow();
         Agent agent = runner.agent(job);
+        Optional<TaskRuns.Takeover> takeover = runs.takeover(run.id());
+        // A step queued for whoever no longer works the run (the Lead took over, or handed back) is dropped.
+        if (!agent.id().equals(takeover.map(TaskRuns.Takeover::leadId).orElse(run.agentId()))) return;
         if (run.pauseRequested()) {
             tx.executeWithoutResult(s -> {
                 String meeting = pausedForMeeting(run.id());
@@ -231,11 +284,16 @@ public class TaskExecution {
             });
             return;
         }
-        if (run.tokens() >= run.tokenBudget()) {
+        if (takeover.isPresent()) {
+            String spent = takeoverSpent(run, takeover.get());
+            if (spent != null) {
+                takeoverFailed(run, task, agent, spent);
+                return;
+            }
+        } else if (run.tokens() >= run.tokenBudget()) {
             block(run, task, agent, "Token budget reached (" + run.tokens() + " of " + run.tokenBudget() + ")");
             return;
-        }
-        if (run.segmentSteps() >= maxSegmentSteps) {
+        } else if (run.segmentSteps() >= maxSegmentSteps) {
             block(run, task, agent, "Step limit reached (" + maxSegmentSteps + " steps without submitting)");
             return;
         }
@@ -248,14 +306,17 @@ public class TaskExecution {
         AgentRunner.Context ctx = null;
         String text = null;
         if (perMinute <= 0) {
-            ctx = runner.context(agent, query, NORMAL.specChars(), NORMAL.memoryChars()).withStable(AgentTools.MANUAL);
-            text = prompt(run, task, agent, NORMAL);
+            // The Lead in a takeover keeps more of its own work in view: with 12 entries it read the same files again
+            // and again (T-29: app.js read 10 times in 30 steps).
+            Lean lean = takeover.isPresent() ? TAKEOVER : NORMAL;
+            ctx = runner.context(agent, query, lean.specChars(), lean.memoryChars()).withStable(AgentTools.MANUAL);
+            text = prompt(run, task, agent, lean, takeover);
         } else {
             // The whole request must fit in the provider's per-minute allowance: take the first level that fits.
             long budget = (perMinute - maxOut - 400) * CHARS_PER_TOKEN;
             for (Lean lean : LEAN) {
                 ctx = runner.context(agent, query, lean.specChars(), lean.memoryChars()).withStable(AgentTools.MANUAL);
-                text = prompt(run, task, agent, lean);
+                text = prompt(run, task, agent, lean, takeover);
                 long size = ctx.stable().length() + (ctx.dynamic() == null ? 0 : ctx.dynamic().length()) + text.length();
                 if (size <= budget) break;
             }
@@ -290,7 +351,7 @@ public class TaskExecution {
         long ms = (System.nanoTime() - t0) / 1_000_000;
         tx.executeWithoutResult(s -> {
             runs.usage(run.id(), usage.input, usage.output, usage.cacheRead, usage.cost);
-            runs.step(run, "MODEL", null, decision.path("thought").asString("(no thought)"),
+            runs.step(run, "MODEL", null, (takeover.isPresent() ? "Lead: " : "") + decision.path("thought").asString("(no thought)"),
                     Map.of("actions", decision.path("actions").size(), "cacheRead", usage.cacheRead), "OK",
                     usage.input, usage.output, ms);
         });
@@ -310,6 +371,7 @@ public class TaskExecution {
             AgentTools.Result r = switch (tool) {
                 case "task.submit" -> new AgentTools.Result("OK", "task.submit", "Submitted.", Map.of(), AgentTools.End.SUBMIT);
                 case "task.block" -> new AgentTools.Result("OK", "task.block · " + args.path("reason").asString(""), "Blocked.", Map.of(), AgentTools.End.BLOCK);
+                case "task.handback" -> handbackCheck(run, takeover);
                 case "message.send" -> sendMessage(run, task, agent, args);
                 case "memory.record" -> record(run, agent, args);
                 default -> tools.run(ws, tool, args);
@@ -323,14 +385,44 @@ public class TaskExecution {
             tx.executeWithoutResult(s -> runs.step(run, "TOOL", tool, result.summary(), detail, result.outcome(), 0, 0, ams));
             if (r.end() != AgentTools.End.NONE) {
                 end = r.end();
-                endText = tool.equals("task.submit") ? args.path("summary").asString("") : args.path("reason").asString("");
+                endText = switch (tool) {
+                    case "task.submit" -> args.path("summary").asString("");
+                    case "task.handback" -> args.path("note").asString("");
+                    default -> args.path("reason").asString("");
+                };
                 break;
             }
             if (!"OK".equals(r.outcome())) break;
         }
 
+        if (takeover.isPresent()) {
+            // The Lead works the run (docs/17): no ladder, no stop after two failing test runs; its own limits only.
+            Agent worker = agents.find(run.agentId()).orElseThrow();
+            switch (end) {
+                case BLOCK -> takeoverFailed(run, task, agent, "the Lead stopped: " + (endText == null || endText.isBlank() ? "no reason given" : endText));
+                case SUBMIT -> submit(run, task, worker, endText);
+                case HANDBACK -> handBack(run, task, agent, endText);
+                default -> {
+                    String loop = repeatedFailure(run.id());
+                    if (loop != null) takeoverFailed(run, task, agent, "the same call failed 3 times (" + loop + ")");
+                    else next(run);
+                }
+            }
+            return;
+        }
         if (end == AgentTools.End.BLOCK) {
-            block(run, task, agent, endText == null || endText.isBlank() ? "Blocked without a reason" : endText);
+            String reason = endText == null || endText.isBlank() ? "Blocked without a reason" : endText;
+            if (waitsForNothing(reason) && hasWork(run)) {
+                // Seen on T-21: "Proceed to the next feature or wait for instructions" with the work committed; the Lead
+                // spent two decisions saying "go on". The submission decides objectively: tests, then review.
+                tx.executeWithoutResult(s -> runs.step(run, "PLATFORM", null, "Submitted for the agent: it waited with its work done",
+                        Map.of("text", "You stopped with \"" + AgentTools.clip(reason) + "\" while your branch has work: the "
+                                + "platform submitted it. Never wait for instructions: when your work is done, task.submit."),
+                        "OK", 0, 0, 0));
+                submit(run, task, agent, task.title());
+                return;
+            }
+            block(run, task, agent, reason);
             return;
         }
         if (end == AgentTools.End.SUBMIT) {
@@ -342,7 +434,36 @@ public class TaskExecution {
             block(run, task, agent, "Stopped by the watchdog: the same call failed 3 times (" + loop + ")");
             return;
         }
+        String tests = testsFailedTwice(run.id());
+        if (tests != null) {
+            block(run, task, agent, TESTS_FAILED_TWICE + syntaxScan(run) + tests);
+            return;
+        }
+        String edits = editsKeepFailing(runs.steps(run.id()));
+        if (edits != null) {
+            block(run, task, agent, edits);
+            return;
+        }
         next(run);
+    }
+
+    /** A block that asks nothing: the agent waits for a next step or says it is done (no question, no missing access). */
+    private static final Pattern WAITS = Pattern.compile("(?i)\\b(wait(ing)?|await(ing)?|proceed|next (step|feature|task)|further instructions|"
+            + "(is|are|has been|have been|been) (done|complete|completed|implemented|finished)|tests? pass(es|ed)?|ready for review|nothing (left|more) to do)\\b");
+    private static final Pattern NEEDS = Pattern.compile("(?i)\\?|\\b(credential|token|password|api key|access|permission|approval|decide|decision|which|unclear|ambiguous|conflict|missing|cannot|can't|unable|error|fail)");
+
+    static boolean waitsForNothing(String reason) {
+        return reason != null && WAITS.matcher(reason).find() && !NEEDS.matcher(reason).find();
+    }
+
+    /** The branch has changes compared to the branch it goes into (committed or not). */
+    private boolean hasWork(TaskRun run) {
+        try {
+            Path wt = Path.of(run.worktree());
+            return git.dirty(wt) || !git.changes(wt, git.integrationBranch(wt), "HEAD").isEmpty();
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private static final String UNUSABLE = "Reply not usable: ";
@@ -395,6 +516,7 @@ public class TaskExecution {
             }
             if (!o.has("thought")) o.put("thought", "Calls " + calls.stream().map(c -> toolName(c.path("name").asString(""))).collect(java.util.stream.Collectors.joining(", ")) + ".");
         }
+        if (node instanceof ObjectNode o) blockWhenIdle(o);
         JsonNode actions = node.path("actions");
         if (!actions.isArray() || actions.isEmpty()) throw new AgentRunner.InvalidOutput("\"actions\" must list 1 to 5 actions.");
         if (actions.size() > MAX_ACTIONS && node instanceof ObjectNode o && actions instanceof tools.jackson.databind.node.ArrayNode arr) {
@@ -403,20 +525,101 @@ public class TaskExecution {
             while (arr.size() > MAX_ACTIONS) arr.remove(arr.size() - 1);
             o.put(DROPPED, dropped);
         }
+        if (actions instanceof tools.jackson.databind.node.ArrayNode arr) {
+            for (int i = 0; i < arr.size(); i++) arr.set(i, normalizeAction(arr.get(i)));
+        }
         for (JsonNode a : actions) {
             String tool = a.path("tool").asString("");
             if (!AgentTools.TOOLS.contains(tool)) {
-                throw new AgentRunner.InvalidOutput("Unknown tool \"" + tool + "\". Tools: " + String.join(", ", AgentTools.TOOLS.stream().sorted().toList()) + ".");
+                String tools = String.join(", ", AgentTools.TOOLS.stream().sorted().toList());
+                throw new AgentRunner.InvalidOutput(tool.isBlank()
+                        ? "Each action must be {\"tool\": \"<name>\", \"args\": {...}}, e.g. {\"tool\": \"task.block\", \"args\": {\"reason\": \"...\"}}. Tools: " + tools + "."
+                        : "Unknown tool \"" + tool + "\". Tools: " + tools + ".");
             }
         }
     }
 
+    /**
+     * No action but a reason ("Waiting for the Lead's clarification"): the agent cannot go on, which is a block request.
+     * Read as one, it reaches the Lead (docs/16) instead of failing as an unusable reply.
+     */
+    static void blockWhenIdle(ObjectNode o) {
+        String thought = o.path("thought").asString("").strip();
+        if (!o.path("actions").isArray() || !o.path("actions").isEmpty() || thought.isBlank()) return;
+        ObjectNode block = o.objectNode().put("tool", "task.block");
+        block.putObject("args").put("reason", thought.length() > 2_000 ? thought.substring(0, 2_000) : thought);
+        o.putArray("actions").add(block);
+    }
+
+    /**
+     * Reads the action shapes small models write instead of {"tool": t, "args": {...}} when the intent is unambiguous:
+     * the tool as the key ({"task.block": {...}}), or "name"/"action"/"tool_name" with "arguments"/"parameters"/"input".
+     * A retry costs a whole correction round trip; this costs nothing.
+     */
+    static JsonNode normalizeAction(JsonNode a) {
+        if (!(a instanceof ObjectNode o) || AgentTools.TOOLS.contains(o.path("tool").asString(""))) return a;
+        ObjectNode out = o.objectNode();
+        String tool = null;
+        for (String key : List.of("tool", "name", "action", "tool_name", "function")) {
+            String v = o.path(key).asString("");
+            if (AgentTools.TOOLS.contains(v)) {
+                tool = v;
+                break;
+            }
+        }
+        JsonNode args = null;
+        if (tool != null) {
+            for (String key : List.of("args", "arguments", "parameters", "params", "input")) {
+                if (o.path(key).isObject()) {
+                    args = o.path(key);
+                    break;
+                }
+            }
+        } else {
+            // {"task.block": {"reason": "..."}}: one known tool as the only key (besides an empty "tool").
+            List<String> keys = o.propertyNames().stream().filter(k -> !(k.equals("tool") && o.path(k).asString("").isBlank())).toList();
+            if (keys.size() == 1 && AgentTools.TOOLS.contains(keys.getFirst())) {
+                tool = keys.getFirst();
+                args = o.path(tool).isObject() ? o.path(tool) : o.objectNode();
+            }
+        }
+        if (tool == null) return a;
+        out.put("tool", tool);
+        out.set("args", args == null ? o.objectNode() : args);
+        return out;
+    }
+
     private void next(TaskRun run) {
-        tx.executeWithoutResult(s -> jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP,
+        tx.executeWithoutResult(s -> jobs.enqueue(runs.workspaceOf(run), run.projectId(), driver(run), STEP,
                 Map.of("runId", run.id()), run.id()));
     }
 
-    private String ensureSandbox(TaskRun stale) {
+    /** Who works the run now: the Lead during a takeover (docs/17), else the run's agent. */
+    String driver(TaskRun run) {
+        return runs.takeover(run.id()).map(TaskRuns.Takeover::leadId).orElse(run.agentId());
+    }
+
+    /** JavaScript files of the branch that do not parse ({@link AgentTools#syntaxScan}), or "". */
+    String syntaxScan(TaskRun run) {
+        try {
+            return AgentTools.syntaxScan(sandboxes, ensureSandbox(run), Path.of(run.worktree()));
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    /** node --check of one file of the run's worktree: {line, message}, or null when it parses or cannot be checked. */
+    Object[] nodeCheck(TaskRun run, String path) {
+        try {
+            SandboxService.Command c = sandboxes.exec(ensureSandbox(run), "node --check '" + path.replace("'", "") + "'",
+                    java.time.Duration.ofSeconds(20));
+            return c.ok() ? null : LineEdits.nodeSyntaxError(c.output());
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    String ensureSandbox(TaskRun stale) {
         TaskRun run = runs.find(stale.id()).orElseThrow(); // the sandbox may have been (re)started earlier in this job
         String image = run.image() == null ? SandboxService.imageFor(Path.of(run.worktree())) : run.image();
         String id = sandboxes.ensure(run.id(), run.sandboxId(), Path.of(run.worktree()), image);
@@ -425,8 +628,10 @@ public class TaskExecution {
     }
 
     /** The prompt of a step: the task, the branch, the compacted history and what is new since the last decision. */
-    private String prompt(TaskRun run, Task task, Agent agent, Lean lean) {
+    private String prompt(TaskRun run, Task task, Agent agent, Lean lean, Optional<TaskRuns.Takeover> takeover) {
         StringBuilder sb = new StringBuilder();
+        List<RunStep> all = runs.steps(run.id());
+        if (takeover.isPresent()) sb.append(takeoverBrief(run, task, all, takeover.get()));
         sb.append("<task number=\"T-").append(task.number()).append("\">\n").append(task.title()).append("\n");
         if (task.description() != null && !task.description().isBlank()) sb.append(task.description().strip()).append("\n");
         sb.append("Acceptance criteria (each must be proven by an automated test):\n");
@@ -434,7 +639,7 @@ public class TaskExecution {
             sb.append(i + 1).append(". ").append(task.acceptanceCriteria().get(i).text()).append("\n");
         }
         sb.append("</task>\n");
-        brief(task, agent).ifPresent(b -> sb.append("<brief from=\"Lead\">\n").append(b).append("\n</brief>\n"));
+        if (takeover.isEmpty()) brief(task, agent).ifPresent(b -> sb.append("<brief from=\"Lead\">\n").append(b).append("\n</brief>\n"));
         Path wt = Path.of(run.worktree());
         sb.append("<repository branch=\"").append(run.branch()).append("\">\n");
         List<GitService.FileChange> changes = git.changes(wt, git.integrationBranch(wt), "HEAD");
@@ -444,7 +649,18 @@ public class TaskExecution {
         var plan = dev.aiw.quality.TestOutput.plan(wt);
         sb.append("Test command: ").append(plan == null ? "none yet (add one, see rules)" : plan.command()).append("\n</repository>\n");
 
-        List<RunStep> steps = runs.steps(run.id());
+        // The context starts at the latest intervention (CTO requirement, 2026-11-20: after the Lead's repair the agent
+        // must not go back to the problem). Before, it carried twelve entries of its own failed attempts across the
+        // Lead's message, whose text it lost after one step: on T-28 it redid the same broken edits after every answer.
+        int reset = contextStart(all, takeover);
+        List<RunStep> steps = all.subList(reset, all.size());
+        RunStep instruction = reset > 0 && all.get(reset - 1).kind().equals("MESSAGE") ? all.get(reset - 1) : null;
+        if (instruction != null) {
+            Object text = instruction.detail().get("text");
+            sb.append("<latest_instruction from=\"").append(instruction.summary().replace("Message from the ", ""))
+                    .append("\" priority=\"follow it; earlier attempts are left out on purpose\">\n")
+                    .append(AgentTools.clip(text == null ? instruction.summary() : text.toString(), 4_000)).append("\n</latest_instruction>\n");
+        }
         int lastModel = -1;
         for (int i = 0; i < steps.size(); i++) if ("MODEL".equals(steps.get(i).kind())) lastModel = i;
         List<RunStep> history = steps.subList(0, lastModel + 1 > 0 ? lastModel + 1 : 0);
@@ -456,6 +672,7 @@ public class TaskExecution {
 
         if (!answered.isEmpty()) {
             sb.append("<history>\n");
+            if (reset > 0) sb.append("(work before the latest instruction is left out: the repository state above sums it up)\n");
             if (answered.size() > lean.historyEntries()) {
                 int dropped = answered.size() - lean.historyEntries();
                 answered = new ArrayList<>(answered.subList(dropped, answered.size()));
@@ -494,9 +711,9 @@ public class TaskExecution {
             }
             sb.append("</new>\n");
         }
-        sb.append("Step ").append(run.steps() + 1).append(" · tokens used ").append(run.tokens()).append(" of ")
+        if (takeover.isEmpty()) sb.append("Step ").append(run.steps() + 1).append(" · tokens used ").append(run.tokens()).append(" of ")
                 .append(run.tokenBudget()).append(".");
-        if (run.tokens() * 10 >= run.tokenBudget() * 8) {
+        if (takeover.isEmpty() && run.tokens() * 10 >= run.tokenBudget() * 8) {
             sb.append(" Your budget is nearly spent: commit what works and task.submit if the criteria are proven; otherwise "
                     + "task.block and say precisely what remains, so the Lead can split it into smaller tasks.");
         }
@@ -508,6 +725,49 @@ public class TaskExecution {
         return sb.toString();
     }
 
+    /**
+     * Index of the first step the prompt shows: just after the latest message (Lead, CTO, meeting), or, during a
+     * takeover, just after the takeover started (or a later message).
+     */
+    static int contextStart(List<RunStep> steps, Optional<TaskRuns.Takeover> takeover) {
+        int start = 0;
+        for (int i = 0; i < steps.size(); i++) {
+            RunStep st = steps.get(i);
+            if (st.kind().equals("MESSAGE") || (takeover.isPresent() && st.seq() == takeover.get().fromSeq())) start = i + 1;
+        }
+        if (takeover.isPresent()) {
+            // A message from before the takeover is the agent's, not the Lead's.
+            for (int i = 0; i < steps.size(); i++) if (steps.get(i).seq() == takeover.get().fromSeq()) start = Math.max(start, i + 1);
+        }
+        return start;
+    }
+
+    /** What the Lead needs when it works the task itself: why the agent stopped and how its takeover ends. */
+    private String takeoverBrief(TaskRun run, Task task, List<RunStep> steps, TaskRuns.Takeover t) {
+        String worker = agents.find(run.agentId()).map(Agent::name).orElse("The agent");
+        RunStep marker = steps.stream().filter(st -> st.seq() == t.fromSeq()).findFirst().orElse(null);
+        Object why = marker == null ? null : marker.detail().get("text");
+        long stepsUsed = steps.stream().filter(st -> st.seq() > t.fromSeq() && "MODEL".equals(st.kind())).count();
+        long tokensLeft = Math.max(0, Math.min(takeoverTokens - (run.tokens() - t.tokensAtStart()), run.tokenBudget() - run.tokens()));
+        boolean canHandBack = (run.tokenBudget() - run.tokens()) * 5 >= run.tokenBudget();
+        return "<takeover>\nYou are the Lead. " + worker + " could not finish T-" + task.number() + " after several attempts: "
+                + "you take over and work on its branch yourself, with the tools below, until the tests pass.\n"
+                + "Why it stopped:\n" + AgentTools.clip(why == null ? "(see the repository)" : why.toString(), 3_000) + "\n"
+                + Regressions.explain(Regressions.find(git, Path.of(run.worktree()), why == null ? "" : why.toString()), true)
+                + "- The repository is the truth: read the failing tests and the code they import before changing anything.\n"
+                + "- A test written on this branch may be what is wrong (it tests outside the task, contradicts another test, "
+                + "or cannot run under node --test): fix or rewrite it. A test that comes from develop is a requirement.\n"
+                + "- A small file (under about 200 lines) whose structure is damaged: rewrite it whole with one file.write of "
+                + "complete, valid content rather than line edits.\n"
+                + "- Run the tests (exec) after each change; commit what works.\n"
+                + "When the tests pass: task.submit {\"summary\"} if every criterion of the task is proven"
+                + (canHandBack ? "; otherwise task.handback {\"note\": \"what you repaired and what remains for " + worker
+                        + "\"}: " + worker + " goes on from your work with a fresh context" : " (" + worker
+                        + "'s budget is spent: you finish the task)") + ".\n"
+                + "If you cannot make progress: task.block {\"reason\"}; the CTO decides.\n"
+                + "You have " + Math.max(0, takeoverSteps - stepsUsed) + " steps and " + tokensLeft + " tokens left.\n</takeover>\n";
+    }
+
     private Optional<String> brief(Task task, Agent agent) {
         return collaboration.threadOf("TASK", task.id()).flatMap(t -> collaboration.messages(t).stream()
                 .filter(m -> "ASSIGNMENT".equals(m.type()) && agent.id().equals(m.toAgentId()))
@@ -515,6 +775,38 @@ public class TaskExecution {
     }
 
     /** The same failing call three times in a row: the agent is looping. */
+    static final String TESTS_FAILED_TWICE = "Tests failed twice in a row; the Lead takes over. Latest failure:\n";
+    private static final java.util.regex.Pattern TEST_COMMAND = java.util.regex.Pattern.compile(
+            "^(npm (run )?test|npx (jest|vitest|mocha)|node --test|pytest|python3? -m (pytest|unittest)|mvn( -q)? test)\\b");
+
+    /**
+     * Tests may fail at most twice in a row (CTO requirement, 2026-11-18): an agent that does not fix them in two tries
+     * on a small model rarely does in ten, it burns its steps and its budget (seen: 40 steps on one brace). Counts the
+     * test runs since the last intervention (a message from the Lead or the CTO, a resume); returns the latest failing
+     * excerpt when the last two failed, else null.
+     */
+    String testsFailedTwice(String runId) {
+        List<RunStep> steps = runs.steps(runId);
+        int failed = 0;
+        String latest = null;
+        for (int i = steps.size() - 1; i >= 0; i--) {
+            RunStep st = steps.get(i);
+            if (st.kind().equals("MESSAGE") || (st.kind().equals("PLATFORM") && st.summary().startsWith("Resumed"))) break;
+            boolean submission = st.kind().equals("PLATFORM") && st.summary().startsWith("Tests ") && st.summary().contains("on submission");
+            Object command = st.detail() == null ? null : st.detail().get("command");
+            boolean own = st.kind().equals("TOOL") && "exec".equals(st.tool()) && command instanceof String c && TEST_COMMAND.matcher(c.strip()).find();
+            if (!submission && !own) continue;
+            if (st.outcome().equals("OK")) break;
+            failed++;
+            if (latest == null) {
+                Object out = submission ? st.detail().get("text") : st.detail().get("output");
+                latest = out instanceof String o ? dev.aiw.quality.TestOutput.failingExcerpt(o, 30) : st.summary();
+            }
+            if (failed >= 2) return latest.length() > 3_000 ? latest.substring(0, 3_000) + "…" : latest;
+        }
+        return null;
+    }
+
     private String repeatedFailure(String runId) {
         List<RunStep> toolSteps = runs.steps(runId).stream().filter(s -> s.kind().equals("TOOL")).toList();
         if (toolSteps.size() < 3) return null;
@@ -560,9 +852,137 @@ public class TaskExecution {
             runs.step(run, "PLATFORM", null, "Blocked: " + reason, Map.of(), "OK", 0, 0, 0);
             tasks.block(task.id(), reason, Actor.agent(agent.id()));
             agents.setResting(agent.id(), "BLOCKED", reason);
-            agents.lead(task.projectId()).filter(l -> !l.id().equals(agent.id())).ifPresent(lead ->
-                    tasks.message(task, Actor.agent(agent.id()), lead.id(), "PROBLEM", "T-" + task.number() + " is blocked: " + reason));
+            agents.lead(task.projectId()).filter(l -> !l.id().equals(agent.id())).ifPresent(lead -> {
+                tasks.message(task, Actor.agent(agent.id()), lead.id(), "PROBLEM", "T-" + task.number() + " is blocked: " + reason);
+                // Mode A: the Lead decides first; the CTO only gets what the Lead cannot settle (docs/16).
+                if ("ACTIVE".equals(lead.status()) && lead.model() != null) {
+                    jobs.enqueue(runs.workspaceOf(run), task.projectId(), lead.id(), LeadUnblocker.UNBLOCK,
+                            Map.of("taskId", task.id(), "runId", run.id(), "reason", reason), task.id());
+                }
+            });
         });
+    }
+
+    // ================================================================== the Lead takes over (docs/17)
+
+    /**
+     * Changes refused or failed (file.edit, file.write) since the last intervention: past {@link #FAILED_EDITS}, the agent
+     * is stopped and the Lead decides. Seen on T-28 (2026-11-19): more than a hundred refused edits of one 90-line file,
+     * 40 steps at a time, each segment ending on the step limit.
+     */
+    static final int FAILED_EDITS = 6;
+
+    static String editsKeepFailing(List<RunStep> steps) {
+        int failed = 0;
+        String last = null;
+        for (int i = steps.size() - 1; i >= 0; i--) {
+            RunStep st = steps.get(i);
+            if (st.kind().equals("MESSAGE") || (st.kind().equals("PLATFORM") && st.summary().startsWith("Resumed"))) break;
+            if (st.kind().equals("TOOL") && Set.of("file.edit", "file.write").contains(st.tool()) && !"OK".equals(st.outcome())) {
+                failed++;
+                if (last == null) last = st.summary();
+            }
+        }
+        return failed >= FAILED_EDITS ? "Edits keep failing: " + failed + " changes refused since the last instruction (latest: "
+                + last + "). The agent cannot make this change; the Lead takes over." : null;
+    }
+
+    /**
+     * The Lead works the blocked run itself, on the agent's branch, with the same tools, until the tests pass (CTO
+     * requirement, 2026-11-20: a task that failed four times is the Lead's to repair). Its steps go in the same run, its
+     * commits carry its name. The agent is free meanwhile; it gets the work back with a fresh context.
+     */
+    void takeOver(Task task, TaskRun run, Agent lead, String why, String reason) {
+        String ws = runs.workspaceOf(run);
+        tx.executeWithoutResult(s -> {
+            RunStep marker = runs.step(run, "PLATFORM", null, "The Lead takes over: " + why, Map.of("text", reason), "OK", 0, 0, 0);
+            runs.startTakeover(run, lead.id(), marker.seq());
+            if ("BLOCKED".equals(task.status())) tasks.unblock(task.id(), Actor.agent(lead.id()));
+            tasks.advance(task.id(), "IN_PROGRESS", Actor.agent(lead.id()), Map.of("runId", run.id()));
+            runs.status(run, "RUNNING", null);
+            agents.setResting(run.agentId(), "AVAILABLE", null);
+            agents.setResting(lead.id(), "WORKING", null);
+            leadDecided(task, lead, "takeover", why);
+            jobs.enqueue(ws, run.projectId(), lead.id(), STEP, Map.of("runId", run.id()), run.id());
+        });
+    }
+
+    /** The takeover's own limits: steps and tokens since it started. Returns why it is over, or null. */
+    private String takeoverSpent(TaskRun run, TaskRuns.Takeover t) {
+        if (run.tokens() >= run.tokenBudget()) return "the task's budget of " + run.tokenBudget() + " tokens is spent";
+        long tokens = run.tokens() - t.tokensAtStart();
+        if (tokens >= takeoverTokens) return "its budget of " + takeoverTokens + " tokens is spent";
+        long steps = runs.steps(run.id()).stream().filter(st -> st.seq() > t.fromSeq() && "MODEL".equals(st.kind())).count();
+        return steps >= takeoverSteps ? "it used its " + takeoverSteps + " steps" : null;
+    }
+
+    /** task.handback: allowed during a takeover, when the agent still has a fifth of its budget to go on with. */
+    private AgentTools.Result handbackCheck(TaskRun run, Optional<TaskRuns.Takeover> takeover) {
+        if (takeover.isEmpty()) {
+            return AgentTools.Result.refused("task.handback", "Only the Lead hands work back. Use task.submit or task.block.");
+        }
+        long left = run.tokenBudget() - run.tokens();
+        if (left * 5 < run.tokenBudget()) {
+            return AgentTools.Result.refused("task.handback", "The agent has spent its budget (" + Math.max(0, left)
+                    + " tokens left): finish the task yourself and task.submit.");
+        }
+        return new AgentTools.Result("OK", "task.handback", "Handed back.", Map.of(), AgentTools.End.HANDBACK);
+    }
+
+    /**
+     * The Lead gives the work back: its note becomes the agent's instruction and the start of its context (what came
+     * before is left out of the agent's prompt, so it does not go back to the problem). The takeover's tokens count in
+     * the task's budget: it is never raised.
+     */
+    private void handBack(TaskRun run, Task task, Agent lead, String note) {
+        TaskRuns.Takeover t = runs.takeover(run.id()).orElseThrow();
+        TaskRun now = runs.find(run.id()).orElseThrow();
+        long used = now.tokens() - t.tokensAtStart();
+        String text = "I (the Lead) took over T-" + task.number() + " and repaired it. " + (note == null || note.isBlank()
+                ? "" : note.strip()) + "\nContinue from the repository as it is now: do not redo or undo my changes. Read a "
+                + "file before editing it, run the tests, then task.submit when every criterion is proven.";
+        tx.executeWithoutResult(s -> {
+            runs.endTakeover(run.id());
+            // The takeover counts in the task's budget, which is never raised (a task stays under the ceiling).
+            runs.step(now, "PLATFORM", null, "The Lead's takeover used " + used + " tokens; " + Math.max(0, now.tokenBudget()
+                    - now.tokens()) + " are left for the task", Map.of(), "OK", 0, 0, 0);
+            leadMessage(task, now, lead, AgentTools.clip(text, 4_000));
+            runs.step(now, "PLATFORM", null, "Resumed", Map.of(), "OK", 0, 0, 0);
+            agents.setResting(lead.id(), "AVAILABLE", null);
+            agents.setResting(run.agentId(), "WORKING", null);
+            leadDecided(task, lead, "handback", AgentTools.clip(note == null ? "" : note, 500));
+            jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+        });
+    }
+
+    /** The takeover could not finish: the run is blocked and the Lead tells the CTO (no new round of decisions). */
+    private void takeoverFailed(TaskRun run, Task task, Agent lead, String why) {
+        String reason = "The Lead took over and could not finish: " + why;
+        tx.executeWithoutResult(s -> {
+            runs.endTakeover(run.id());
+            runs.status(run, "BLOCKED", reason);
+            runs.step(run, "PLATFORM", null, "Blocked: " + reason, Map.of(), "OK", 0, 0, 0);
+            if (!TaskService.CLOSED.contains(task.status()) && !"BLOCKED".equals(task.status())) {
+                tasks.block(task.id(), reason, Actor.agent(lead.id()));
+            }
+            agents.setResting(lead.id(), "AVAILABLE", null);
+            if (runs.openForAgent(run.agentId()).stream().noneMatch(r -> "RUNNING".equals(r.status()))) {
+                agents.setResting(run.agentId(), "AVAILABLE", null);
+            }
+            leadDecided(task, lead, "takeover_failed", why);
+            jobs.enqueue(runs.workspaceOf(run), task.projectId(), lead.id(), LeadUnblocker.UNBLOCK,
+                    Map.of("taskId", task.id(), "runId", run.id(), "reason", reason, "afterTakeover", "true"), task.id());
+        });
+    }
+
+    /** A decision of the Lead on the task, as LeadUnblocker records them (event + audit). */
+    void leadDecided(Task task, Agent lead, String decision, String why) {
+        String ws = tasks.workspaceOf(task);
+        Actor actor = Actor.agent(lead.id());
+        events.publish(ws, task.projectId(), "task.lead_decided", actor, new Subject("task", task.id()),
+                Map.of("number", task.number(), "decision", decision, "why", why == null ? "" : why));
+        audit.record(ws, actor, "task.lead_decided", "task", task.id(), AuditLog.Decision.RECORDED,
+                Map.of("number", String.valueOf(task.number()), "decision", decision));
     }
 
     public TaskRun pause(String taskId, String userId) {
@@ -580,8 +1000,13 @@ public class TaskExecution {
         TaskRun run = runs.openForTask(taskId).filter(r -> Set.of("PAUSED", "BLOCKED").contains(r.status()))
                 .orElseThrow(() -> ApiException.conflict("not_paused", "No paused or blocked work on this task"));
         Task task = tasks.find(taskId).orElseThrow();
+        if (Set.of("DONE", "CANCELLED").contains(task.status())) {
+            closeFinishedRuns();
+            throw ApiException.conflict("task_finished", "T-" + task.number() + " is " + task.status().toLowerCase()
+                    + ": its old work was closed, there is nothing to resume");
+        }
         if (runs.agentBusyElsewhere(run.agentId(), run.id())) throw ApiException.conflict("agent_busy", "The agent is working on another task");
-        if (budgetExhausted(run)) {
+        if (budgetExhausted(run) && runs.takeover(run.id()).isEmpty()) {
             throw ApiException.conflict("budget_exhausted", "The token budget of this task is spent (" + run.tokens() + " of "
                     + run.tokenBudget() + "): raise it or ask the Lead to split the task");
         }
@@ -589,11 +1014,44 @@ public class TaskExecution {
             if ("BLOCKED".equals(task.status())) tasks.unblock(taskId, actor);
             tasks.advance(taskId, "IN_PROGRESS", actor, Map.of("runId", run.id()));
             runs.status(run, "RUNNING", null);
+            jdbc.sql("UPDATE task_runs SET resume_when_free = false WHERE id = ?").param(run.id()).update();
             runs.step(run, "PLATFORM", null, "Resumed", Map.of(), "OK", 0, 0, 0);
-            agents.setResting(run.agentId(), "WORKING", null);
-            jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+            agents.setResting(driver(run), "WORKING", null);
+            jobs.enqueue(runs.workspaceOf(run), run.projectId(), driver(run), STEP, Map.of("runId", run.id()), run.id());
         });
         return runs.find(run.id()).orElseThrow();
+    }
+
+    /**
+     * Runs left open on a task that is done or cancelled (seen on T-8, 2026-11-19: done since the 16th, its run stayed
+     * BLOCKED; every "Retry" on its agent tried to restart it in a worktree deleted with the merged branch). They are
+     * closed, their sandbox stopped, and the agent is no longer shown blocked by them.
+     */
+    void closeFinishedRuns() {
+        List<TaskRun> stale = jdbc.sql("""
+                SELECT r.id FROM task_runs r JOIN tasks t ON t.id = r.task_id
+                WHERE r.status IN ('RUNNING', 'PAUSED', 'SUBMITTED', 'BLOCKED') AND t.status IN ('DONE', 'CANCELLED')
+                """).query(String.class).list().stream().map(id -> runs.find(id).orElseThrow()).toList();
+        for (TaskRun run : stale) {
+            String status = tasks.find(run.taskId()).map(Task::status).orElse("CANCELLED");
+            tx.executeWithoutResult(s -> {
+                runs.takeover(run.id()).ifPresent(t -> {
+                    runs.endTakeover(run.id());
+                    agents.setResting(t.leadId(), "AVAILABLE", null);
+                });
+                runs.status(run, status, null);
+                jdbc.sql("UPDATE task_runs SET resume_when_free = false WHERE id = ?").param(run.id()).update();
+                if (runs.openForAgent(run.agentId()).isEmpty()) agents.setResting(run.agentId(), "AVAILABLE", null);
+            });
+            if (run.sandboxId() != null) {
+                try {
+                    sandboxes.stop(run.sandboxId());
+                } catch (RuntimeException e) {
+                    // already gone
+                }
+            }
+            log.info("Closed run {} of a {} task", run.id(), status.toLowerCase());
+        }
     }
 
     static boolean budgetExhausted(TaskRun run) {
@@ -606,6 +1064,10 @@ public class TaskExecution {
      */
     public TaskRun setBudget(String taskId, String userId, long budget) {
         TaskRun run = runs.openForTask(taskId).orElseThrow(() -> ApiException.conflict("no_run", "No open work on this task"));
+        if (budget > maxTaskTokens) {
+            throw ApiException.badRequest("over_task_ceiling", "A task never uses more than " + maxTaskTokens
+                    + " tokens: ask the Lead to split it into smaller tasks instead");
+        }
         if (budget <= run.tokens()) {
             throw ApiException.badRequest("budget_too_low", "This task has already used " + run.tokens() + " tokens: give more than that");
         }
@@ -655,8 +1117,8 @@ public class TaskExecution {
                 tasks.advance(task.id(), "IN_PROGRESS", Actor.system(), Map.of("runId", run.id()));
                 runs.status(run, "RUNNING", null);
                 runs.step(run, "PLATFORM", null, "Resumed after the meeting", Map.of(), "OK", 0, 0, 0);
-                agents.setResting(run.agentId(), "WORKING", null);
-                jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+                agents.setResting(driver(run), "WORKING", null);
+                jobs.enqueue(runs.workspaceOf(run), run.projectId(), driver(run), STEP, Map.of("runId", run.id()), run.id());
                 resumed++;
             }
         }
@@ -680,8 +1142,8 @@ public class TaskExecution {
         tasks.advance(taskId, "IN_PROGRESS", Actor.system(), Map.of("runId", run.id()));
         runs.status(run, "RUNNING", null);
         runs.step(run, "PLATFORM", null, "Resumed with the solution from the meeting", Map.of(), "OK", 0, 0, 0);
-        agents.setResting(run.agentId(), "WORKING", null);
-        jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+        agents.setResting(driver(run), "WORKING", null);
+        jobs.enqueue(runs.workspaceOf(run), run.projectId(), driver(run), STEP, Map.of("runId", run.id()), run.id());
         return "resumed";
     }
 
@@ -724,11 +1186,27 @@ public class TaskExecution {
         });
     }
 
+    /** The run resumes by itself once its agent is free (the Lead settled the block while the agent was busy). */
+    void resumeWhenFree(TaskRun run) {
+        jdbc.sql("UPDATE task_runs SET resume_when_free = true WHERE id = ?").param(run.id()).update();
+        runs.step(run, "PLATFORM", null, "Resumes as soon as the agent finishes its current task", Map.of(), "OK", 0, 0, 0);
+    }
+
+    /** The Lead answers the agent of a blocked task (docs/16): read at the agent's next step, like the CTO's messages. */
+    void leadMessage(Task task, TaskRun run, Agent lead, String content) {
+        tasks.message(task, Actor.agent(lead.id()), run.agentId(), "RECOMMENDATION", content);
+        runs.step(run, "MESSAGE", null, "Message from the Lead", Map.of("text", content), "OK", 0, 0, 0);
+    }
+
     /** Called when the task is cancelled: the run stops and its sandbox is removed; the branch stays. */
     public void onCancelled(String taskId) {
         runs.openForTask(taskId).ifPresent(run -> {
             sandboxes.stop(run.sandboxId());
             tx.executeWithoutResult(s -> {
+                runs.takeover(run.id()).ifPresent(t -> {
+                    runs.endTakeover(run.id());
+                    agents.setResting(t.leadId(), "AVAILABLE", null);
+                });
                 runs.status(run, "CANCELLED", null);
                 if (!runs.agentBusy(run.agentId())) agents.setResting(run.agentId(), "AVAILABLE", null);
             });
@@ -746,12 +1224,26 @@ public class TaskExecution {
     }
 
     void failed(AgentJob job, String error) {
-        Optional.ofNullable(job.string("runId")).flatMap(runs::find).ifPresent(run -> tx.executeWithoutResult(s -> {
+        TaskRun failedRun = Optional.ofNullable(job.string("runId")).flatMap(runs::find).orElse(null);
+        if (failedRun != null && runs.takeover(failedRun.id()).map(t -> t.leadId().equals(job.agentId())).orElse(false)) {
+            // The Lead's own step failed during its takeover: the CTO decides, the Lead stays available.
+            takeoverFailed(failedRun, tasks.find(failedRun.taskId()).orElseThrow(), agents.find(job.agentId()).orElseThrow(),
+                    "a step failed: " + error);
+            return;
+        }
+        Optional.ofNullable(failedRun).ifPresent(run -> tx.executeWithoutResult(s -> {
             runs.status(run, "BLOCKED", error);
             runs.step(run, "PLATFORM", null, "Step failed: " + error, Map.of(), "ERROR", 0, 0, 0);
             Task task = tasks.find(run.taskId()).orElseThrow();
             if (!TaskService.CLOSED.contains(task.status()) && !"BLOCKED".equals(task.status())) {
                 tasks.block(task.id(), error, Actor.system());
+            }
+            // A failed step (watchdog, unusable replies) is a block like any other: the Lead decides first. Before,
+            // it waited for the CTO (T-28, 2026-11-19: twice overnight).
+            if (!TaskService.CLOSED.contains(task.status())) {
+                agents.lead(task.projectId()).filter(l -> !l.id().equals(run.agentId()) && "ACTIVE".equals(l.status()) && l.model() != null)
+                        .ifPresent(lead -> jobs.enqueue(runs.workspaceOf(run), task.projectId(), lead.id(), LeadUnblocker.UNBLOCK,
+                                Map.of("taskId", task.id(), "runId", run.id(), "reason", "Step failed: " + error), task.id()));
             }
         }));
     }
@@ -769,7 +1261,7 @@ public class TaskExecution {
             if (STEP.equals(job.type())) {
                 tasks.advance(task.id(), "IN_PROGRESS", Actor.system(), Map.of());
                 runs.status(run, "RUNNING", null);
-                agents.setResting(run.agentId(), "WORKING", null);
+                agents.setResting(driver(run), "WORKING", null);
             }
         }));
     }
@@ -782,7 +1274,10 @@ public class TaskExecution {
      */
     private void submit(TaskRun run, Task task, Agent agent, String summary) {
         Path wt = Path.of(run.worktree());
-        GitService.Author author = author(agent);
+        // During a takeover the Lead commits (traceability); the merge request stays the agent's task.
+        Optional<TaskRuns.Takeover> takeover = runs.takeover(run.id());
+        Agent committer = takeover.flatMap(t -> agents.find(t.leadId())).orElse(agent);
+        GitService.Author author = author(committer);
         git.commitAll(wt, "T-" + task.number() + ": " + firstLine(summary, task.title()), author);
         String ws = runs.workspaceOf(run);
         // Work started before the develop branch existed also goes through it.
@@ -820,8 +1315,19 @@ public class TaskExecution {
         TestRun tr = testRun.get();
         if (!tr.succeeded()) {
             tx.executeWithoutResult(s -> tasks.advance(task.id(), "IN_PROGRESS", Actor.system(), Map.of()));
-            back(run, "Tests " + tr.status().toLowerCase() + " on submission (tr-" + tr.number() + ")",
-                    "The platform ran `" + tr.command() + "` on your branch merged with " + target + ":\n" + tr.failingExcerpt());
+            String broken = Regressions.explain(Regressions.find(git, Path.of(run.worktree()), tr.failingExcerpt()), false)
+                    + AgentTools.syntaxScan(sandboxes, ensureSandbox(run), Path.of(run.worktree()))
+                    + AgentTools.testFileProblems(Path.of(run.worktree()));
+            String text = "The platform ran `" + tr.command() + "` on your branch merged with " + target + ":\n"
+                    + (broken.isEmpty() ? "" : broken + "\n") + tr.failingExcerpt();
+            tx.executeWithoutResult(st -> runs.step(run, "PLATFORM", null, "Tests " + tr.status().toLowerCase() + " on submission (tr-"
+                    + tr.number() + ")", Map.of("text", text), "ERROR", 0, 0, 0));
+            String twice = takeover.isPresent() ? null : testsFailedTwice(run.id());
+            if (twice != null) {
+                block(run, task, agent, TESTS_FAILED_TWICE + syntaxScan(run) + twice);
+                return;
+            }
+            next(run);
             return;
         }
         Optional<Agent> reviewer = reviewerFor(task, agent, target);
@@ -842,8 +1348,13 @@ public class TaskExecution {
             runs.step(run, "PLATFORM", null, "Submitted: tests passed (tr-" + tr.number() + "), merge request !" + mr.number()
                     + (reviewer.isPresent() ? " · review by " + reviewer.get().name() : " · review by the CTO"),
                     Map.of("mrId", mr.id(), "testRun", tr.number()), "OK", 0, 0, 0);
-            tasks.advance(task.id(), "IN_REVIEW", Actor.agent(agent.id()), Map.of("mrId", mr.id()));
+            tasks.advance(task.id(), "IN_REVIEW", Actor.agent(committer.id()), Map.of("mrId", mr.id()));
             agents.setResting(agent.id(), "AVAILABLE", null);
+            if (takeover.isPresent()) {
+                runs.endTakeover(run.id());
+                agents.setResting(committer.id(), "AVAILABLE", null);
+                leadDecided(task, committer, "takeover_submitted", "The Lead finished the task itself: tests pass (tr-" + tr.number() + ")");
+            }
             reviewer.ifPresent(r -> jobs.enqueue(ws, run.projectId(), r.id(), REVIEW, Map.of("mrId", mr.id()), mr.id()));
         });
     }
@@ -852,7 +1363,7 @@ public class TaskExecution {
     private void back(TaskRun run, String summary, String text) {
         tx.executeWithoutResult(s -> {
             runs.step(run, "PLATFORM", null, summary, Map.of("text", text), "ERROR", 0, 0, 0);
-            jobs.enqueue(runs.workspaceOf(run), run.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+            jobs.enqueue(runs.workspaceOf(run), run.projectId(), driver(run), STEP, Map.of("runId", run.id()), run.id());
         });
     }
 
@@ -1087,7 +1598,7 @@ public class TaskExecution {
                 runs.step(run, "PLATFORM", null, "Changes requested by " + reviewerName + " on !" + mr.number(),
                         Map.of("text", text.toString()), "ERROR", 0, 0, 0);
                 agents.setResting(run.agentId(), "WORKING", null);
-                jobs.enqueue(ws, mr.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+                jobs.enqueue(ws, mr.projectId(), driver(run), STEP, Map.of("runId", run.id()), run.id());
                 return;
             }
             Map<String, Object> checks = gates(mr, task, criteria);
@@ -1174,7 +1685,7 @@ public class TaskExecution {
         runs.step(run, "PLATFORM", null, "The CTO declined the merge of !" + mr.number(),
                 Map.of("text", e.reason() == null ? "No reason given." : e.reason()), "ERROR", 0, 0, 0);
         agents.setResting(run.agentId(), "WORKING", null);
-        jobs.enqueue(e.workspaceId(), mr.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+        jobs.enqueue(e.workspaceId(), mr.projectId(), driver(run), STEP, Map.of("runId", run.id()), run.id());
     }
 
     /** Re-checks against the current target (tests again if it moved), merges, closes the task. */
@@ -1243,7 +1754,7 @@ public class TaskExecution {
             runs.status(run, "RUNNING", null);
             runs.step(run, "PLATFORM", null, "Merge stopped: the target branch moved", Map.of("text", text), "ERROR", 0, 0, 0);
             agents.setResting(run.agentId(), "WORKING", null);
-            jobs.enqueue(runs.workspaceOf(run), mr.projectId(), run.agentId(), STEP, Map.of("runId", run.id()), run.id());
+            jobs.enqueue(runs.workspaceOf(run), mr.projectId(), driver(run), STEP, Map.of("runId", run.id()), run.id());
         });
     }
 

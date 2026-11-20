@@ -5,7 +5,7 @@ import { api } from "../api/client";
 import { ArrowUpRight } from "lucide-react";
 import type { Agent, BudgetView, Project } from "../api/types";
 import { AgentAvatar } from "../components/AgentAvatar";
-import { Button, Card, Empty, ErrorText, Field, Input, PageHeader, SkeletonRows, Table, Textarea } from "../components/ui";
+import { Button, Card, Empty, ErrorText, Field, Input, PageHeader, Segmented, Select, SkeletonRows, Table, Textarea } from "../components/ui";
 import { dateTime, usd } from "../lib/format";
 
 export function ProjectsPage() {
@@ -74,10 +74,33 @@ function NewProject({ workspaceId, onCancel }: { workspaceId: string; onCancel: 
   const [description, setDescription] = useState("");
   const [spec, setSpec] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [source, setSource] = useState<"NEW" | "GIT" | "FOLDER">("NEW");
+  const [repoUrl, setRepoUrl] = useState("");
+  const [branch, setBranch] = useState("");
+  const [token, setToken] = useState("");
+  const [folder, setFolder] = useState("");
+  const folders = useQuery({
+    queryKey: ["import-folders", workspaceId],
+    queryFn: () => api.get<{ directory: string; folders: string[] }>(`/api/v1/workspaces/${workspaceId}/import-folders`),
+    enabled: source === "FOLDER",
+  });
 
+  // A failed import (wrong token, wrong URL) is retried on the project already created, not on a new one.
+  const [created, setCreated] = useState<Project | null>(null);
+  const [imported, setImported] = useState(false);
   const create = useMutation({
     mutationFn: async () => {
-      const project = await api.post<Project>(`/api/v1/workspaces/${workspaceId}/projects`, { name, description });
+      const project = created ?? await api.post<Project>(`/api/v1/workspaces/${workspaceId}/projects`, { name, description });
+      setCreated(project);
+      // Existing code first: its map becomes a specification the Lead reads with the brief (docs/17).
+      if (imported) {
+        // already done on a previous attempt
+      } else if (source === "GIT") {
+        await api.post(`/api/v1/projects/${project.id}/repo/import`, { kind: "GIT", url: repoUrl.trim(), branch: branch.trim() || null, token: token.trim() || null });
+      } else if (source === "FOLDER") {
+        await api.post(`/api/v1/projects/${project.id}/repo/import`, { kind: "FOLDER", folder });
+      }
+      setImported(true);
       if (file) {
         const form = new FormData();
         form.append("file", file);
@@ -107,7 +130,35 @@ function NewProject({ workspaceId, onCancel }: { workspaceId: string; onCancel: 
         <Field label="Short description">
           <Input maxLength={2000} value={description} onChange={(e) => setDescription(e.target.value)} />
         </Field>
-        <Field label="Specification" hint="Paste Markdown, or upload a .md / .txt file (2 MB max). PDF and Word are not supported yet.">
+        <Field label="Code" hint={source === "NEW" ? "The team starts from an empty repository."
+          : source === "GIT" ? "Cloned over HTTPS. The token (read access) stays encrypted on this server and is never written to the repository."
+          : `A folder of ${folders.data?.directory ?? "the import directory"} (./imports next to docker-compose.yml): a Git repository keeps its history.`}>
+          <Segmented value={source} onChange={setSource} items={[
+            { value: "NEW", label: "New project" }, { value: "GIT", label: "Git repository" }, { value: "FOLDER", label: "Local folder" },
+          ]} />
+        </Field>
+        {source === "GIT" && (
+          <div className="grid gap-3 sm:grid-cols-[1fr_10rem]">
+            <Field label="Repository URL">
+              <Input required type="url" placeholder="https://github.com/owner/repo.git" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
+            </Field>
+            <Field label="Branch">
+              <Input placeholder="default" value={branch} onChange={(e) => setBranch(e.target.value)} />
+            </Field>
+            <Field label="Access token (private repository)">
+              <Input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} />
+            </Field>
+          </div>
+        )}
+        {source === "FOLDER" && (
+          <Field label="Folder">
+            <Select required value={folder} onChange={(e) => setFolder(e.target.value)}>
+              <option value="">{folders.data?.folders.length === 0 ? "No folder in the import directory yet" : "Choose…"}</option>
+              {folders.data?.folders.map((f) => <option key={f} value={f}>{f}</option>)}
+            </Select>
+          </Field>
+        )}
+        <Field label={source === "NEW" ? "Specification" : "What to do with this code"} hint="Paste Markdown, or upload a .md / .txt file (2 MB max). PDF and Word are not supported yet.">
           <Textarea rows={8} value={spec} onChange={(e) => setSpec(e.target.value)} disabled={!!file}
             placeholder="I want to build a banking platform managing customers, accounts, wallets and transactions…" />
         </Field>
@@ -115,7 +166,7 @@ function NewProject({ workspaceId, onCancel }: { workspaceId: string; onCancel: 
           className="text-[13px] text-muted file:mr-3 file:rounded-sm file:border file:border-line-strong file:bg-panel file:px-3 file:py-1 file:text-fg" />
         <ErrorText error={create.error} />
         <div className="flex gap-2">
-          <Button type="submit" disabled={create.isPending}>Create project</Button>
+          <Button type="submit" disabled={create.isPending}>{create.isPending && source !== "NEW" ? "Importing the code…" : "Create project"}</Button>
           <Button type="button" variant="ghost" onClick={onCancel}>Cancel</Button>
         </div>
       </form>

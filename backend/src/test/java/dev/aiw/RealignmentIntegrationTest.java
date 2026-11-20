@@ -72,8 +72,126 @@ class RealignmentIntegrationTest {
     static final String WAIT = """
             {"thought": "Waiting.", "actions": [{"tool": "task.block", "args": {"reason": "Waiting for the CTO"}}]}""";
 
+    /**
+     * CTO requirement 2026-11-18 (docs/16): a blocked task goes to the Lead first. A technical question is answered
+     * and the work resumes by itself; a product choice is escalated to the CTO in the Lead's chat.
+     */
     @Test
-    void anExhaustedBudgetIsRaisedAndATooBigTaskIsSplitByTheLead() {
+    void theLeadSettlesTechnicalBlocksAndEscalatesProductChoices() {
+        stub.anthropicResponder = body -> {
+            if (body.contains("needs a decision. You lead the team")) {
+                return body.contains("payment provider")
+                        ? """
+                          {"decision": "escalate", "why": "A product choice.", "question": "Stripe or PayPal? I recommend Stripe."}"""
+                        : """
+                          {"decision": "answer", "why": "Node returns null.", "message": "Change the test: assert.doesNotThrow(() => execSync('npm run lint'))."}""";
+            }
+            if (body.contains("<tools>") && body.contains("Lint check")) {
+                return body.contains("assert.doesNotThrow")
+                        ? """
+                          {"thought": "Next question.", "actions": [{"task.block": {"reason": "Which payment provider should we use?"}}]}"""
+                        : """
+                          {"thought": "Unsure.", "actions": [{"task.block": {"reason": "tests/lint.test.js expects undefined but execSync returns null"}}]}""";
+            }
+            return "OK";
+        };
+        TestApi api = new TestApi(port);
+        api.register("cto-unblock");
+        String ws = api.post("/api/v1/workspaces", Map.of("name", "Unblock")).json().get("id").asString();
+        api.post("/api/v1/workspaces/" + ws + "/providers", Map.of(
+                "kind", "ANTHROPIC", "name", "Anthropic", "baseUrl", stub.baseUrl(), "apiKey", "sk-ant-test"));
+        String p = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "Lint")).json().get("id").asString();
+        String leadId = null;
+        for (JsonNode a : api.get("/api/v1/projects/" + p + "/agents").json()) if (a.get("lead").asBoolean()) leadId = a.get("id").asString();
+        String lead = leadId;
+        JsonNode dev = api.post("/api/v1/projects/" + p + "/agents", Map.of("roleTemplateId", "rt_java")).json();
+        String task = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Lint check",
+                "acceptanceCriteria", List.of("npm run lint passes"), "assigneeId", dev.get("id").asString())).json().get("id").asString();
+
+        // The Lead answered the technical question: its message reached the agent and the work resumed by itself.
+        JsonNode steps = await(() -> api.get("/api/v1/tasks/" + task + "/run").json().get("steps"),
+                st -> st.toString().contains("Message from the Lead") && st.toString().contains("payment provider"));
+        assertThat(steps.toString()).contains("Resumed").contains("assert.doesNotThrow");
+
+        // The product choice is escalated: the task stays blocked and the Lead asks the CTO in its chat.
+        JsonNode said = await(() -> api.get("/api/v1/agents/" + lead + "/messages").json(),
+                m -> m.toString().contains("needs your decision"));
+        assertThat(said.toString()).contains("Stripe or PayPal? I recommend Stripe.").contains("Which payment provider");
+        assertThat(api.get("/api/v1/tasks/" + task).json().get("task").get("status").asString()).isEqualTo("BLOCKED");
+
+        // The Lead saw what the block is about, and nothing more than it needs.
+        String decision = stub.requests.stream().map(StubModelServer.Captured::body)
+                .filter(b -> b.contains("needs a decision. You lead the team") && b.contains("lint.test.js")).findFirst().orElseThrow();
+        assertThat(decision).contains("<blocked_because>").contains("<last_steps>").contains("Never escalate a technical question");
+    }
+
+    /**
+     * CTO requirement 2026-11-20 (docs/17): a task that fails four times is the Lead's to repair. The Lead answers,
+     * answers, rewrites; at the fourth block it takes over without a model decision, works the branch with the tools,
+     * hands it back, and the agent goes on from the repaired state with a fresh context (its failed attempts left out).
+     */
+    @Test
+    void afterFourFailuresTheLeadTakesOverRepairsAndHandsBack() {
+        stub.anthropicResponder = body -> {
+            if (body.contains("needs a decision. You lead the team") && body.contains("Adder")) {
+                return body.contains("are not accepted any more")
+                        ? """
+                          {"decision": "rewrite", "why": "Smaller.", "task": {"description": "Make lib.js export add(a, b)."}, "message": "Only add()."}"""
+                        : """
+                          {"decision": "answer", "why": "Try again.", "message": "Export add from lib.js."}""";
+            }
+            if (body.contains("<takeover>")) {
+                return body.contains("file.write lib.js")
+                        ? """
+                          {"thought": "Repaired.", "actions": [{"tool": "task.handback", "args": {"note": "lib.js exports add; tests/lib.test.js proves it."}}]}"""
+                        : """
+                          {"thought": "I write it myself.", "actions": [
+                            {"tool": "file.write", "args": {"path": "package.json", "content": "{\\"name\\": \\"adder\\", \\"type\\": \\"module\\", \\"scripts\\": {\\"test\\": \\"node --test\\"}}\\n"}},
+                            {"tool": "file.write", "args": {"path": "lib.js", "content": "export function add(a, b) {\\n  return a + b;\\n}\\n"}},
+                            {"tool": "file.write", "args": {"path": "tests/lib.test.js", "content": "import { test } from 'node:test';\\nimport assert from 'node:assert';\\nimport { add } from '../lib.js';\\n\\ntest('add', () => assert.strictEqual(add(1, 2), 3));\\n"}},
+                            {"tool": "git.commit", "args": {"message": "Repair lib.js"}}]}""";
+            }
+            if (body.contains("<tools>") && body.contains("Adder")) {
+                return body.contains("I (the Lead) took over")
+                        ? """
+                          {"thought": "The Lead repaired it; tests prove it.", "actions": [{"tool": "task.submit", "args": {"summary": "add() exported and tested."}}]}"""
+                        : """
+                          {"thought": "Stuck.", "actions": [{"tool": "task.block", "args": {"reason": "I cannot make lib.js work"}}]}""";
+            }
+            return "OK";
+        };
+        TestApi api = new TestApi(port);
+        api.register("cto-takeover");
+        String ws = api.post("/api/v1/workspaces", Map.of("name", "Takeover")).json().get("id").asString();
+        api.post("/api/v1/workspaces/" + ws + "/providers", Map.of(
+                "kind", "ANTHROPIC", "name", "Anthropic", "baseUrl", stub.baseUrl(), "apiKey", "sk-ant-test"));
+        String p = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "Adder")).json().get("id").asString();
+        JsonNode dev = api.post("/api/v1/projects/" + p + "/agents", Map.of("roleTemplateId", "rt_java")).json();
+        String task = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Adder",
+                "acceptanceCriteria", List.of("add(1, 2) is 3"), "assigneeId", dev.get("id").asString())).json().get("id").asString();
+
+        // The agent submits after the hand-back: the platform's tests pass on the Lead's repair.
+        JsonNode view = await(() -> api.get("/api/v1/tasks/" + task + "/run").json(),
+                v -> v.get("steps").toString().contains("Submitted: tests passed"));
+        String steps = view.get("steps").toString();
+        assertThat(steps).contains("The Lead takes over").contains("Lead: I write it myself.").contains("I (the Lead) took over")
+                .contains("are left for the task").doesNotContain("Budget raised");
+        // Three decisions of the Lead, then the takeover by code (no fourth model decision).
+        long decisions = stub.requests.stream().filter(r -> r.body().contains("needs a decision. You lead the team")
+                && r.body().contains("Adder")).count();
+        assertThat(decisions).isEqualTo(3);
+        // The agent's prompt after the hand-back starts at the Lead's instruction: its failed attempts are left out.
+        String after = stub.requests.stream().map(StubModelServer.Captured::body)
+                .filter(b -> b.contains("<tools>") && b.contains("I (the Lead) took over") && !b.contains("<takeover>"))
+                .findFirst().orElseThrow();
+        assertThat(after).contains("<latest_instruction").doesNotContain("I cannot make lib.js work");
+        // The Lead saw why the agent stopped.
+        assertThat(stub.requests.stream().anyMatch(r -> r.body().contains("<takeover>") && r.body().contains("I cannot make lib.js work"))).isTrue();
+        api.post("/api/v1/tasks/" + task + "/cancel", Map.of());
+    }
+
+    @Test
+    void aTaskThatReachesItsBudgetIsSplitByTheLeadNeverRaised() {
         stub.anthropicInputTokens = 6_000;
         stub.anthropicResponder = body -> {
             if (body.contains("too big for one run")) {
@@ -106,27 +224,12 @@ class RealignmentIntegrationTest {
         String downstream = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Downstream",
                 "acceptanceCriteria", List.of("uses the big task"), "dependsOn", List.of(big))).json().get("id").asString();
 
-        JsonNode run = await(() -> api.get("/api/v1/tasks/" + big + "/run").json().get("run"),
-                r -> !r.isNull() && r.get("status").asString().equals("BLOCKED"));
-        assertThat(run.get("tokenBudget").asLong()).isEqualTo(10_000);
-        assertThat(run.get("blockedReason").asString()).contains("Token budget reached");
+        // A task never goes past the ceiling: neither the project setting nor a run's budget can be set above it.
+        assertThat(api.put("/api/v1/projects/" + p + "/budget", Map.of("taskTokenBudget", 1_000_000)).status()).isEqualTo(400);
 
-        // Resuming without more budget is refused; a budget below what was used is refused; a real raise resumes.
-        assertThat(api.post("/api/v1/tasks/" + big + "/run/resume", Map.of()).status()).isEqualTo(409);
-        assertThat(api.put("/api/v1/tasks/" + big + "/run/budget", Map.of("tokenBudget", 10_001)).status()).isEqualTo(400);
-        JsonNode raised = api.put("/api/v1/tasks/" + big + "/run/budget", Map.of("tokenBudget", 1_000_000)).json();
-        assertThat(raised.get("tokenBudget").asLong()).isEqualTo(1_000_000);
-        assertThat(raised.get("status").asString()).isEqualTo("RUNNING");
-        await(() -> api.get("/api/v1/tasks/" + big + "/run").json(), v -> v.get("steps").toString().contains("Token budget changed by the CTO")
-                && v.get("steps").toString().contains("Resumed"));
-
-        // Splitting needs the work paused first.
-        assertThat(api.post("/api/v1/tasks/" + big + "/split", Map.of()).status()).isEqualTo(409);
-        api.post("/api/v1/tasks/" + big + "/run/pause", Map.of());
+        // The run reaches its budget: the Lead splits the task by itself (no CTO, no raise), the first part continues the branch.
         String branch = await(() -> api.get("/api/v1/tasks/" + big + "/run").json().get("run"),
-                r -> r.get("status").asString().equals("PAUSED")).get("branch").asString();
-        assertThat(api.post("/api/v1/tasks/" + big + "/split", Map.of("guidance", "Keep the parts tiny")).status()).isEqualTo(202);
-
+                r -> !r.isNull() && !r.get("branch").isNull()).get("branch").asString();
         JsonNode tasks = await(() -> api.get("/api/v1/projects/" + p + "/tasks").json(), t -> t.size() == 4);
         JsonNode original = find(tasks, "Big task"), one = find(tasks, "Part one"), two = find(tasks, "Part two");
         assertThat(original.get("status").asString()).isEqualTo("CANCELLED");
@@ -136,8 +239,8 @@ class RealignmentIntegrationTest {
         assertThat(find(tasks, "Downstream").get("dependsOn").toString())
                 .contains(one.get("id").asString()).contains(two.get("id").asString()).doesNotContain(big);
         assertThat(api.get("/api/v1/tasks/" + big + "/run").json().get("run").get("status").asString()).isEqualTo("CANCELLED");
-        assertThat(stub.requests.stream().anyMatch(r -> r.body().contains("too big for one run") && r.body().contains("Keep the parts tiny")
-                && r.body().contains("10000 tokens"))).isTrue();
+        assertThat(stub.requests.stream().anyMatch(r -> r.body().contains("too big for one run") && r.body().contains("of its 10000 tokens")
+                && r.body().contains("at most HALF"))).isTrue();
 
         // Part one continues the committed work on the original branch.
         JsonNode oneRun = await(() -> api.get("/api/v1/tasks/" + one.get("id").asString() + "/run").json().get("run"), r -> !r.isNull());
@@ -353,7 +456,7 @@ class RealignmentIntegrationTest {
                 m -> m.size() == 2 && !m.get(1).get("status").asString().equals("PENDING")).get(1);
         assertThat(reply.get("status").asString()).isEqualTo("FINAL");
         assertThat(reply.get("content").asString()).isEqualTo("Hello from stub");
-        List<StubModelServer.Captured> calls = stub.requests.subList(before, stub.requests.size());
+        List<StubModelServer.Captured> calls = own(before, "Hello");
         assertThat(calls).hasSize(3);
         assertThat(calls.get(0).body()).contains("\"max_tokens\":4000");
         assertThat(calls.get(1).body()).contains("\"max_tokens\":1000");
@@ -363,8 +466,8 @@ class RealignmentIntegrationTest {
         before = stub.requests.size();
         api.post("/api/v1/agents/" + leadId + "/messages", Map.of("content", "Again"));
         await(() -> api.get("/api/v1/agents/" + leadId + "/messages").json(), m -> m.size() == 4);
-        assertThat(stub.requests.subList(before, stub.requests.size())).hasSize(1);
-        assertThat(stub.requests.getLast().body()).contains("\"max_tokens\":1000");
+        assertThat(own(before, "Again")).hasSize(1);
+        assertThat(own(before, "Again").getLast().body()).contains("\"max_tokens\":1000");
 
         // OpenRouter-style limits: the model's own max_tokens ceiling, then credits for fewer tokens.
         stub.openAiErrors.add(new Object[] {400, """
@@ -376,10 +479,14 @@ class RealignmentIntegrationTest {
         JsonNode third = await(() -> api.get("/api/v1/agents/" + leadId + "/messages").json(),
                 m -> m.size() == 6 && !m.get(5).get("status").asString().equals("PENDING")).get(5);
         assertThat(third.get("status").asString()).isEqualTo("FINAL");
-        calls = stub.requests.subList(before, stub.requests.size());
+        calls = own(before, "Third");
         assertThat(calls).hasSize(3);
         assertThat(calls.get(1).body()).contains("\"max_tokens\":800");
         assertThat(calls.get(2).body()).contains("\"max_tokens\":630");
+
+        // The rest is about the engineer's calls: a paused Lead does not decide on the blocks below (docs/16), so no
+        // background call takes the provider errors queued for the engineer.
+        api.put("/api/v1/agents/" + leadId + "/status", Map.of("status", "PAUSED"));
 
         // A model that answers with a native tool call: its call is read as the action.
         JsonNode dev = api.post("/api/v1/projects/" + p + "/agents", Map.of("roleTemplateId", "rt_java")).json();
@@ -408,7 +515,8 @@ class RealignmentIntegrationTest {
         assertThat(leanRun.get("blockedReason").asString()).contains("Lean prompt worked");
         // Both 413s failed their attempt (the 800-token cap learned above leaves no room to shrink); the third attempt
         // went through. The "same Requested" path is covered in ModelGatewayRateLimitTest.
-        assertThat(stub.requests.subList(mark, stub.requests.size())).hasSize(3);
+        assertThat(stub.requests.subList(mark, stub.requests.size()).stream()
+                .filter(r -> r.body().contains("Long task") && !r.body().contains("needs a decision. You lead the team"))).hasSize(3);
 
         // A daily quota (Groq TPD) with a long wait: the step waits in the queue, the task is not blocked.
         stub.openAiErrors.add(new Object[] {429, """
@@ -417,7 +525,9 @@ class RealignmentIntegrationTest {
                 "acceptanceCriteria", List.of("it works"), "assigneeId", dev.get("id").asString())).json().get("id").asString();
         JsonNode waiting = await(() -> api.get("/api/v1/tasks/" + daily + "/run").json(),
                 v -> !v.get("run").isNull() && v.get("steps").toString().contains("Waiting: "));
-        assertThat(waiting.get("steps").toString()).contains("daily limit reached").contains("waits 8 min");
+        // Either this step met the quota answer itself, or a background call met it first and the model is known to be out.
+        assertThat(waiting.get("steps").toString()).containsAnyOf("daily limit reached", "daily quota reached")
+                .containsPattern("waits [78] min");
         assertThat(waiting.get("run").get("status").asString()).isEqualTo("RUNNING");
         assertThat(api.get("/api/v1/tasks/" + daily).json().get("task").get("status").asString()).isNotEqualTo("BLOCKED");
     }
@@ -486,5 +596,14 @@ class RealignmentIntegrationTest {
             }
         }
         throw new AssertionError("Condition not met in time; last state: " + last);
+    }
+
+    /**
+     * Chat calls since {@code before} carrying the CTO's {@code message}: work left by other tests (the Lead deciding on
+     * blocked tasks, resumed runs, docs/16) shares the stub in the background.
+     */
+    private static List<StubModelServer.Captured> own(int before, String message) {
+        return stub.requests.subList(before, stub.requests.size()).stream()
+                .filter(r -> r.body().contains("\\n\\n" + message + "\"")).toList();
     }
 }

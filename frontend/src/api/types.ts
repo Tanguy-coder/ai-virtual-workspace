@@ -55,7 +55,7 @@ export interface Spend {
 export interface BudgetView {
   dailyLimitUsd: number | null; totalLimitUsd: number | null;
   /** Tokens per task run set by the project (null: the platform default below). */
-  taskTokenBudget: number | null; defaultTaskTokenBudget: number; spend: Spend;
+  taskTokenBudget: number | null; defaultTaskTokenBudget: number; maxTaskTokenBudget: number; spend: Spend;
 }
 export interface EventRecord {
   id: string; seq: number; type: string; occurredAt: string; workspaceId: string; projectId: string | null;

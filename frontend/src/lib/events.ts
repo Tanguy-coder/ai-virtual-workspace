@@ -31,6 +31,20 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
     case "job.completed": return `${who(p.agentId)} finished the ${job[String(p.type)] ?? p.type}`;
     case "job.failed": return `${who(p.agentId)} is blocked: ${job[String(p.type)] ?? p.type} failed — ${p.error}`;
     case "job.retried": return `The CTO retried the ${job[String(p.type)] ?? p.type}`;
+    case "task.lead_decided": return p.decision === "fix" ? `The Lead fixed the code of T-${p.number} itself and resumed the work: ${p.message}`
+      : p.decision === "answer" ? `The Lead answered the block on T-${p.number} and resumed the work: ${p.message}`
+      : p.decision === "rewrite" ? `The Lead rewrote T-${p.number} and resumed the work: ${p.message}`
+      : p.decision === "restore_tests" ? `T-${p.number} had rewritten a test from develop that failed: the platform restored it and resumed the work`
+      : p.decision === "restore_regressed" ? `T-${p.number} broke tests that pass on develop: the platform restored develop's version of the files and the agent redoes its change on top`
+      : p.decision === "restore_parsing" ? `T-${p.number}: files that did not parse were restored to their last valid version and the work resumed`
+      : p.decision === "split" ? `The Lead is splitting T-${p.number}: ${p.why}`
+      : p.decision === "takeover" ? `The Lead takes over T-${p.number} and works it itself: ${p.why}`
+      : p.decision === "handback" ? `The Lead repaired T-${p.number} and handed it back: ${p.why}`
+      : p.decision === "takeover_submitted" ? `The Lead finished T-${p.number} itself and submitted it: ${p.why}`
+      : p.decision === "takeover_failed" ? `The Lead could not finish T-${p.number} itself: ${p.why}`
+      : `The Lead asks the CTO about T-${p.number}: ${p.question}`;
+    case "task.lead_decision_requested": return `The CTO asked the Lead to decide on T-${p.number}`;
+    case "task.lead_decision_failed": return `The Lead could not decide on T-${p.number}: ${p.error}`;
     case "job.deferred": return `${who(p.agentId)} waits for the provider: ${p.reason}`;
     case "briefing.started": return "The CTO briefed the Lead";
     case "briefing.analyzed": return `The Lead analyzed the specification · ${p.questions} question(s), ${p.risks} risk(s)`;
@@ -109,6 +123,7 @@ export function tone(e: EventRecord): "danger" | "warn" | "ok" | "muted" {
   if (e.type === "hiring_proposal.created" || e.type === "briefing.analyzed") return "warn";
   if (e.type === "plan.created" || e.type === "meeting.minutes_published" || e.type === "hiring_proposal.accepted") return "ok";
   if (e.type.startsWith("budget.") || e.type === "approval.requested" || e.type === "job.deferred"
+    || (e.type === "task.lead_decided" && (e.payload.decision === "escalate" || e.payload.decision === "takeover_failed"))
     || e.type === "model.rerouted") return "warn";
   if (e.type === "agent.hired" || e.type === "approval.granted") return "ok";
   return "muted";

@@ -31,11 +31,14 @@ class ModelGatewayController {
     private final BudgetService budgets;
     private final ModelGateway gateway;
     private final long defaultTaskTokens;
+    private final long maxTaskTokens;
 
     ModelGatewayController(WorkspaceAccess access, ProviderService providers, PricingService pricing,
                            BudgetService budgets, ModelGateway gateway,
-                           @org.springframework.beans.factory.annotation.Value("${aiw.execution.token-budget:200000}") long defaultTaskTokens) {
+                           @org.springframework.beans.factory.annotation.Value("${aiw.execution.token-budget:200000}") long defaultTaskTokens,
+                           @org.springframework.beans.factory.annotation.Value("${aiw.execution.max-task-tokens:200000}") long maxTaskTokens) {
         this.access = access;
+        this.maxTaskTokens = maxTaskTokens;
         this.defaultTaskTokens = defaultTaskTokens;
         this.providers = providers;
         this.pricing = pricing;
@@ -136,14 +139,16 @@ class ModelGatewayController {
     }
 
     /** {@code taskTokenBudget}: what the project sets (null: none); {@code defaultTaskTokenBudget}: the platform's. */
+    /** {@code maxTaskTokenBudget}: the ceiling no task ever goes past (a task that needs more is split). */
     record BudgetView(BigDecimal dailyLimitUsd, BigDecimal totalLimitUsd, Long taskTokenBudget, long defaultTaskTokenBudget,
-                      BudgetService.Spend spend) {}
+                      long maxTaskTokenBudget, BudgetService.Spend spend) {}
 
     @GetMapping("/api/v1/projects/{projectId}/budget")
     BudgetView budget(@PathVariable String projectId) {
         access.requireProject(projectId, WorkspaceRole.VIEWER);
         BudgetService.Budget b = budgets.get(projectId);
-        return new BudgetView(b.dailyLimitUsd(), b.totalLimitUsd(), b.taskTokenBudget(), defaultTaskTokens, budgets.spend(projectId));
+        return new BudgetView(b.dailyLimitUsd(), b.totalLimitUsd(), b.taskTokenBudget(), Math.min(defaultTaskTokens, maxTaskTokens),
+                maxTaskTokens, budgets.spend(projectId));
     }
 
     record SetBudget(@DecimalMin("0") BigDecimal dailyLimitUsd, @DecimalMin("0") BigDecimal totalLimitUsd,
@@ -152,6 +157,10 @@ class ModelGatewayController {
     @PutMapping("/api/v1/projects/{projectId}/budget")
     BudgetView setBudget(@PathVariable String projectId, @Valid @RequestBody SetBudget body) {
         String workspaceId = access.requireProject(projectId, WorkspaceRole.ADMIN);
+        if (body.taskTokenBudget() != null && body.taskTokenBudget() > maxTaskTokens) {
+            throw dev.aiw.shared.ApiException.badRequest("over_task_ceiling", "A task never uses more than " + maxTaskTokens
+                    + " tokens; the Lead splits bigger work into smaller tasks");
+        }
         budgets.set(workspaceId, projectId, body.dailyLimitUsd(), body.totalLimitUsd(), body.taskTokenBudget());
         return budget(projectId);
     }

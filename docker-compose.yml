@@ -47,11 +47,14 @@ services:
       AIW_SANDBOX_ENABLED: ${AIW_SANDBOX_ENABLED:-true}
       # Sandboxes are started by the host's Docker daemon: they mount worktrees from this volume, not from a path.
       AIW_SANDBOX_DATA_VOLUME: aiw_aiwdata
+      # Existing projects to import (docs/17): put a folder in ./imports, then choose it when creating a project.
+      AIW_IMPORT_DIR: /imports
     ports:
       - "8090:8090"
     volumes:
       - aiwdata:/root/.aiw
       - /var/run/docker.sock:/var/run/docker.sock
+      - ${AIW_IMPORT_HOST_DIR:-./imports}:/imports:ro
     depends_on:
       postgres:
         condition: service_healthy

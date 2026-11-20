@@ -40,6 +40,8 @@ aiw:
     allowed-origins: ${AIW_ALLOWED_ORIGINS:http://localhost:5180}
   # Increment 4: repositories, worktrees and sandboxes (docs/10).
   data-dir: ${AIW_DATA_DIR:${user.home}/.aiw}
+  # Folders of existing projects that can be imported (docs/17); default: <data-dir>/imports.
+  import-dir: ${AIW_IMPORT_DIR:}
   sandbox:
     enabled: ${AIW_SANDBOX_ENABLED:true}
     cpus: "1"

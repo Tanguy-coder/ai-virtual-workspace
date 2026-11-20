@@ -102,6 +102,24 @@ public class AgentChatService {
         return message(id);
     }
 
+    /**
+     * The agent writes to the CTO in its chat on its own initiative, without a model call: the Lead escalating a
+     * question it cannot settle (docs/16). The CTO answers in the same chat.
+     */
+    public AgentMessage say(String agentId, String content) {
+        Agent agent = agents.find(agentId).orElseThrow(() -> ApiException.notFound("Agent"));
+        String id = Ids.newId();
+        tx.executeWithoutResult(s -> {
+            jdbc.sql("""
+                    INSERT INTO agent_messages (id, workspace_id, agent_id, author_kind, author_id, content, status)
+                    VALUES (?, ?, ?, 'AGENT', ?, ?, 'FINAL')
+                    """).params(id, agent.workspaceId(), agentId, agentId, content).update();
+            events.publish(agent.workspaceId(), agent.projectId(), "message.sent", Actor.agent(agentId),
+                    new Subject("agent", agentId), Map.of("messageId", id, "from", agent.name()));
+        });
+        return message(id);
+    }
+
     @EventListener(ApplicationReadyEvent.class)
     void recover() {
         agents.resetAfterRestart();

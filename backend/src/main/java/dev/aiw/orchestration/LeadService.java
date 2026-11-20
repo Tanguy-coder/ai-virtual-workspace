@@ -624,6 +624,9 @@ public class LeadService {
     }
 
     /** Checks a list of tasks written by the Lead (plan or split): refs, titles, criteria, assignees, no cycle. */
+    /** At most this many acceptance criteria per task: more means the task does several things. */
+    static final int MAX_CRITERIA = 3;
+
     static void validateTasks(JsonNode node, Map<String, Agent> byName, int min, int max) {
         JsonNode list = node.path("tasks");
         if (!list.isArray() || list.size() < min) throw new AgentRunner.InvalidOutput("\"tasks\" must list at least " + min + " tasks.");
@@ -635,6 +638,11 @@ public class LeadService {
             if (text(t, "title").isBlank()) throw new AgentRunner.InvalidOutput("Task " + ref + " has no title.");
             if (strings(t.path("acceptanceCriteria")).isEmpty()) {
                 throw new AgentRunner.InvalidOutput("Task " + ref + " has no acceptance criteria.");
+            }
+            // Minimal tasks (CTO requirement, 2026-11-20: a task never goes past its token budget).
+            if (strings(t.path("acceptanceCriteria")).size() > MAX_CRITERIA) {
+                throw new AgentRunner.InvalidOutput("Task " + ref + " has " + strings(t.path("acceptanceCriteria")).size()
+                        + " acceptance criteria: at most " + MAX_CRITERIA + ". Cut it into smaller tasks.");
             }
             if (!byName.containsKey(text(t, "assignee").toLowerCase())) {
                 throw new AgentRunner.InvalidOutput("Task " + ref + ": unknown assignee \"" + text(t, "assignee") + "\".");

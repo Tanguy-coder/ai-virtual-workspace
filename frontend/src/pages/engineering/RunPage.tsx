@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, GitPullRequest, Pause, Play, Scissors, Send } from "lucide-react";
+import { ArrowLeft, GitPullRequest, MessageSquare, Pause, Play, Scissors, Send } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../../api/client";
@@ -50,6 +50,7 @@ export function RunPage() {
       queryClient.invalidateQueries({ queryKey: ["run", taskId] });
     },
   });
+  const askLead = useMutation({ mutationFn: () => api.post(`/api/v1/tasks/${taskId}/lead-decision`, {}) });
   const split = useMutation({
     mutationFn: () => api.post(`/api/v1/tasks/${taskId}/split`, { guidance: guidance.trim() || null }),
     onSuccess: () => setSplitting(false),
@@ -82,6 +83,9 @@ export function RunPage() {
               <span className="ml-auto flex gap-1.5">
                 {r.status === "RUNNING" && <Button variant="ghost" size="sm" disabled={r.pauseRequested || act.isPending} onClick={() => act.mutate({ path: "/pause" })}><Pause size={13} /> {r.pauseRequested ? "Pausing…" : "Pause"}</Button>}
                 {(r.status === "PAUSED" || r.status === "BLOCKED") && !exhausted && <Button variant="ghost" size="sm" disabled={act.isPending} onClick={() => act.mutate({ path: "/resume" })}><Play size={13} /> Resume</Button>}
+                {r.status === "BLOCKED" && agent && !agent.lead && <Button variant="ghost" size="sm" disabled={askLead.isPending || askLead.isSuccess}
+                  title="The Lead answers the agent and resumes the work, rewrites or splits the task, or asks you in its chat"
+                  onClick={() => askLead.mutate()}><MessageSquare size={13} /> {askLead.isSuccess ? "The Lead is deciding…" : "Ask the Lead"}</Button>}
                 {canSplit && !exhausted && <Button variant="ghost" size="sm" onClick={() => setSplitting(!splitting)}><Scissors size={13} /> Split</Button>}
               </span>
             </div>
@@ -89,10 +93,8 @@ export function RunPage() {
             {exhausted && (
               <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 px-3 py-3">
                 <p className="text-[13px] font-medium">The token budget of this task is spent ({tokens(used)} of {tokens(r.tokenBudget)}).</p>
-                <p className="mt-0.5 text-[12px] text-muted">Give it more tokens and {agent?.name ?? "the agent"} resumes where it stopped, or ask the Lead to split the task into smaller ones; the first one continues this branch.</p>
+                <p className="mt-0.5 text-[12px] text-muted">A task never goes past this budget: the Lead splits what remains into smaller tasks, the first one continues this branch. If it has not yet, ask it.</p>
                 <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                  <Button variant="signal" size="sm" disabled={setBudget.isPending} onClick={() => setBudget.mutate(r.tokenBudget * 2)}><Play size={13} /> Double it ({tokens(r.tokenBudget * 2)}) and resume</Button>
-                  <Button variant="ghost" size="sm" onClick={() => setBudgetDraft(String(r.tokenBudget * 3))}>Other amount</Button>
                   <Button variant="ghost" size="sm" onClick={() => setSplitting(true)}><Scissors size={13} /> Ask the Lead to split</Button>
                 </div>
               </div>
@@ -110,7 +112,7 @@ export function RunPage() {
               </form>
             )}
             {split.isSuccess && <p className="mt-3 text-[12px] text-muted">The Lead is splitting the task; the new tasks appear on the board when it is done.</p>}
-            <ErrorText error={act.error} />
+            <ErrorText error={act.error ?? askLead.error} />
 
             <Card className="mt-4" title="Token budget for this task" action={<span className="flex items-center gap-2">
               <span className="font-mono text-[12px] text-muted">{tokens(used)} / {tokens(r.tokenBudget)} · {usd(r.costUsd)}</span>

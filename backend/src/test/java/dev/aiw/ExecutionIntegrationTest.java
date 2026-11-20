@@ -91,7 +91,23 @@ class ExecutionIntegrationTest {
     static final String RESUBMIT = """
             {"thought": "The code is right; submit again.", "actions": [{"tool": "task.submit", "args": {"summary": "Unchanged: the test proves it."}}]}""";
 
+    static final String STUBBORN_FIRST = FIRST.replace("Add sum with its test", "Add stubborn sum")
+            .replace(",\n  {\"tool\": \"task.submit\", \"args\": {\"summary\": \"sum(a, b) added; test 'adds two numbers' proves criterion 1.\"}}]}",
+                    ",\n  {\"tool\": \"exec\", \"args\": {\"command\": \"npm test\"}}]}");
+    static final String RETEST = """
+            {"thought": "Try again.", "actions": [{"tool": "exec", "args": {"command": "npm test"}}]}""";
+    static final String LEAD_FIX = """
+            {"decision": "fix", "why": "The operator is wrong.", "message": "I fixed the operator in src/sum.js; run the tests and submit.",
+             "edits": [{"path": "src/sum.js", "from": 1, "to": 1, "new": "exports.sum = (a, b) => a + b;"}]}""";
+    static final String AFTER_FIX = """
+            {"thought": "The Lead fixed it.", "actions": [{"tool": "exec", "args": {"command": "npm test"}},
+              {"tool": "task.submit", "args": {"summary": "Fixed by the Lead; test 'adds two numbers' passes."}}]}""";
+
     static String script(String body) {
+        if (body.contains("needs a decision. You lead the team") && body.contains("Stubborn sum")) return LEAD_FIX;
+        if (body.contains("Stubborn sum") && body.contains("<tools>") && !body.contains("You review merge request")) {
+            return body.contains("I fixed the operator") ? AFTER_FIX : body.contains("exit 1") ? RETEST : STUBBORN_FIRST;
+        }
         if (body.contains("<orders_manual>") && body.contains("Ask me again for main")) {
             return "Asking you for the merge.\n<orders>[{\"do\": \"merge_main\", \"note\": \"Solo sum\"}, {\"do\": \"merge_main\"}]</orders>";
         }
@@ -176,6 +192,39 @@ class ExecutionIntegrationTest {
         assertThat(events).contains("task_run.started").contains("task_run.step").contains("test_run.completed")
                 .contains("merge_request.opened").contains("merge_request.reviewed").contains("merge_request.merged")
                 .contains("branch.created").contains("branch.merged");
+    }
+
+    /**
+     * CTO requirement 2026-11-18 (docs/17): tests fail at most twice in a row. The second failure stops the agent; the
+     * Lead sees the failure and the files of the branch, numbered, fixes the code itself, and the work goes on.
+     */
+    @Test
+    void testsFailingTwiceGoToTheLeadWhoFixesTheCode() {
+        stub.anthropicResponder = ExecutionIntegrationTest::script;
+        TestApi api = new TestApi(port);
+        api.register("cto-stubborn");
+        String ws = api.post("/api/v1/workspaces", Map.of("name", "Stubborn")).json().get("id").asString();
+        api.post("/api/v1/workspaces/" + ws + "/providers", Map.of(
+                "kind", "ANTHROPIC", "name", "Anthropic", "baseUrl", stub.baseUrl(), "apiKey", "sk-ant-test"));
+        String p = api.post("/api/v1/workspaces/" + ws + "/projects", Map.of("name", "Stubborn")).json().get("id").asString();
+        String dev = api.post("/api/v1/projects/" + p + "/agents", Map.of("roleTemplateId", "rt_java")).json().get("id").asString();
+        String taskId = api.post("/api/v1/projects/" + p + "/tasks", Map.of("title", "Stubborn sum",
+                "acceptanceCriteria", List.of("sum(2, 3) returns 5"), "assigneeId", dev)).json().get("id").asString();
+
+        JsonNode task = await(() -> api.get("/api/v1/tasks/" + taskId).json().get("task"), t -> t.get("status").asString().equals("DONE"));
+        assertThat(task.get("acceptanceCriteria").get(0).get("met").asBoolean()).isTrue();
+        String steps = api.get("/api/v1/tasks/" + taskId + "/run").json().get("steps").toString();
+        assertThat(steps).contains("Tests failed twice in a row").contains("Message from the Lead").contains("Submitted: tests passed");
+        // Two failing runs, not more: the agent never ran the tests a third time before the Lead stepped in.
+        assertThat(steps.split("npm test · exit 1", -1).length - 1).isEqualTo(2);
+
+        String decision = stub.requests.stream().map(r -> r.body())
+                .filter(b -> b.contains("needs a decision. You lead the team") && b.contains("Stubborn sum")).findFirst().orElseThrow();
+        assertThat(decision).contains("<file path=\\\"src/sum.js\\\"").contains("1: exports.sum = (a, b) => a - b;")
+                .contains("<latest_failed_output>");
+        assertThat(api.get("/api/v1/projects/" + p + "/repo/file?ref=develop&path=src/sum.js").json().get("content").asString())
+                .contains("a + b");
+        assertThat(api.get("/api/v1/projects/" + p + "/repo/log?ref=develop").json().toString()).contains("Fix by the Lead");
     }
 
     @Test

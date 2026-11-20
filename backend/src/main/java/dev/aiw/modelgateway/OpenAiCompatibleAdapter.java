@@ -53,17 +53,21 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
         for (ChatTurn turn : request.turns()) {
             messages.add(Map.of("role", turn.role() == ChatTurn.Role.USER ? "user" : "assistant", "content", turn.text()));
         }
-        Map<String, Object> body = Map.of("model", request.model(), "messages", messages,
-                "max_tokens", request.maxTokens());
+        String modelKey = baseUrl + "|" + request.model();
         JsonNode response;
         try {
-            // Serialized up front so the request carries a Content-Length instead of a chunked body.
-            byte[] payload = JSON.writeValueAsBytes(body);
-            var spec = http.post().uri(baseUrl.replaceAll("/+$", "") + "/chat/completions")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(payload);
-            if (apiKey != null && !apiKey.isBlank()) spec.header("Authorization", "Bearer " + apiKey);
-            response = spec.retrieve().body(JsonNode.class);
+            try {
+                response = post(baseUrl, apiKey, request, messages, COMPLETION_TOKENS.contains(modelKey));
+            } catch (RestClientResponseException e) {
+                // OpenAI's reasoning models (o-series, gpt-5…) refuse max_tokens (seen on T-27, 2026-11-19): retried
+                // with max_completion_tokens, and remembered for the model.
+                if (e.getStatusCode().value() != 400 || !e.getResponseBodyAsString().contains("max_completion_tokens")
+                        || COMPLETION_TOKENS.contains(modelKey)) {
+                    throw e;
+                }
+                COMPLETION_TOKENS.add(modelKey);
+                response = post(baseUrl, apiKey, request, messages, true);
+            }
         } catch (RestClientResponseException e) {
             String failed = failedToolGeneration(e);
             if (failed != null) {
@@ -100,6 +104,22 @@ class OpenAiCompatibleAdapter implements ModelAdapter {
                 response.path("usage").path("completion_tokens").asLong(0),
                 "content_filter".equals(finish),
                 finish, 0, cached);
+    }
+
+    /** Models (base URL | id) that take max_completion_tokens instead of max_tokens. */
+    private static final java.util.Set<String> COMPLETION_TOKENS = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    private JsonNode post(String baseUrl, String apiKey, ModelRequest request, List<Map<String, String>> messages,
+                          boolean completionTokens) {
+        Map<String, Object> body = Map.of("model", request.model(), "messages", messages,
+                completionTokens ? "max_completion_tokens" : "max_tokens", request.maxTokens());
+        // Serialized up front so the request carries a Content-Length instead of a chunked body.
+        byte[] payload = JSON.writeValueAsBytes(body);
+        var spec = http.post().uri(baseUrl.replaceAll("/+$", "") + "/chat/completions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(payload);
+        if (apiKey != null && !apiKey.isBlank()) spec.header("Authorization", "Bearer " + apiKey);
+        return spec.retrieve().body(JsonNode.class);
     }
 
     @Override

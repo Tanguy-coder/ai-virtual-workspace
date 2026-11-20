@@ -32,4 +32,14 @@ class ReplyRepairTest {
                 .hasMessageStartingWith("The JSON is malformed")
                 .hasMessageNotContaining("[Source");
     }
+
+    /** T-28: a file content written as JavaScript string pieces joined with +. */
+    @Test
+    void stringPiecesJoinedWithPlusAreOneString() {
+        String reply = "{\"thought\": \"write\", \"actions\": [{\"tool\": \"file.write\", \"args\": {\"path\": \"a.js\", "
+                + "\"content\": \"const a = 1;\\n\" +\n   \"const b = '+';\\n\" + \"export { a, b };\\n\"}}]}";
+        var node = AgentRunner.parse(reply);
+        org.assertj.core.api.Assertions.assertThat(node.path("actions").get(0).path("args").path("content").asString())
+                .isEqualTo("const a = 1;\nconst b = '+';\nexport { a, b };\n");
+    }
 }

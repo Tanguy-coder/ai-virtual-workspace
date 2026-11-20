@@ -83,6 +83,26 @@ class TaskRuns {
                 Map.of("taskId", run.taskId(), "agentId", run.agentId(), "from", run.tokenBudget(), "to", budget));
     }
 
+    /** The Lead working the run itself (docs/17): who, from which step on, and the run's tokens when it started. */
+    record Takeover(String leadId, int fromSeq, long tokensAtStart) {}
+
+    Optional<Takeover> takeover(String runId) {
+        return jdbc.sql("SELECT takeover_by, takeover_seq, takeover_tokens FROM task_runs WHERE id = ? AND takeover_by IS NOT NULL")
+                .param(runId).query((rs, i) -> new Takeover(rs.getString(1), rs.getInt(2), rs.getLong(3))).optional();
+    }
+
+    void startTakeover(TaskRun run, String leadId, int fromSeq) {
+        jdbc.sql("""
+                UPDATE task_runs SET takeover_by = ?, takeover_seq = ?, takeover_tokens = input_tokens + output_tokens,
+                       resume_when_free = false, updated_at = now() WHERE id = ?
+                """).params(leadId, fromSeq, run.id()).update();
+    }
+
+    void endTakeover(String runId) {
+        jdbc.sql("UPDATE task_runs SET takeover_by = NULL, takeover_seq = NULL, takeover_tokens = NULL, segment_steps = 0, updated_at = now() WHERE id = ?")
+                .param(runId).update();
+    }
+
     /** Marks a run as paused for a meeting (it resumes when the meeting ends); null clears the mark. */
     void pausedForMeeting(String runId, String meetingId) {
         jdbc.sql("UPDATE task_runs SET paused_for_meeting = ?, updated_at = now() WHERE id = ?").params(meetingId, runId).update();

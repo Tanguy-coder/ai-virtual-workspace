@@ -198,7 +198,7 @@ function BudgetRow({ project }: { project: Project }) {
       </div>
       <Field label="Daily $"><Input inputMode="decimal" value={daily ?? String(b?.dailyLimitUsd ?? "")} onChange={(e) => setDaily(e.target.value)} placeholder="none" /></Field>
       <Field label="Total $"><Input inputMode="decimal" value={total ?? String(b?.totalLimitUsd ?? "")} onChange={(e) => setTotal(e.target.value)} placeholder="none" /></Field>
-      <Field label="Tokens per task"><Input inputMode="numeric" value={perTask ?? String(b?.taskTokenBudget ?? "")} onChange={(e) => setPerTask(e.target.value)} placeholder={b?.defaultTaskTokenBudget ? `${b.defaultTaskTokenBudget} (default)` : "default"} /></Field>
+      <Field label="Tokens per task"><Input inputMode="numeric" value={perTask ?? String(b?.taskTokenBudget ?? "")} onChange={(e) => setPerTask(e.target.value)} placeholder={b?.defaultTaskTokenBudget ? `${b.defaultTaskTokenBudget} (default)` : "default"} max={b?.maxTaskTokenBudget} />{b && <span className="text-[11px] text-faint">at most {b.maxTaskTokenBudget}</span>}</Field>
       <Button variant="ghost" onClick={() => save.mutate()} disabled={save.isPending}>Save</Button>
       <div className="sm:col-span-5"><ErrorText error={save.error} /></div>
     </div>

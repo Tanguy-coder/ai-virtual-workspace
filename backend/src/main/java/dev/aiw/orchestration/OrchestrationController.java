@@ -43,9 +43,11 @@ class OrchestrationController {
     private TaskExecution execution;
     private TaskSplitter splitter;
     private RealignmentService realignment;
+    private LeadUnblocker unblocker;
 
     @org.springframework.beans.factory.annotation.Autowired
-    void setExecution(TaskExecution execution, TaskSplitter splitter, RealignmentService realignment) {
+    void setExecution(TaskExecution execution, TaskSplitter splitter, RealignmentService realignment, LeadUnblocker unblocker) {
+        this.unblocker = unblocker;
         this.execution = execution;
         this.splitter = splitter;
         this.realignment = realignment;
@@ -233,6 +235,15 @@ class OrchestrationController {
     Map<String, String> split(@PathVariable String taskId, @Valid @RequestBody(required = false) Split body) {
         Task t = loadTask(taskId, WorkspaceRole.MEMBER);
         splitter.request(taskId, user(t.projectId()), body == null ? null : body.guidance());
+        return Map.of("status", "requested");
+    }
+
+    /** The Lead decides on a blocked task: answers and resumes, rewrites, splits, or asks the CTO (docs/16). */
+    @PostMapping("/api/v1/tasks/{taskId}/lead-decision")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    Map<String, String> leadDecision(@PathVariable String taskId) {
+        Task t = loadTask(taskId, WorkspaceRole.MEMBER);
+        unblocker.request(taskId, user(t.projectId()));
         return Map.of("status", "requested");
     }
 

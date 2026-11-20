@@ -172,7 +172,7 @@ export function Segmented<T extends string>({ value, onChange, items }: { value:
   return (
     <div className="inline-flex h-8 rounded-sm border border-line-strong bg-panel p-0.5">
       {items.map((i) => (
-        <button key={i.value} onClick={() => onChange(i.value)}
+        <button type="button" key={i.value} onClick={() => onChange(i.value)}
           className={`rounded-[3px] px-2.5 text-[12px] font-medium transition-colors ${value === i.value ? "bg-ink text-ink-fg" : "text-muted hover:text-fg"}`}>
           {i.label}
         </button>

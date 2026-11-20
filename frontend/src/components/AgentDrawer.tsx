@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Check, Pause, Play, RotateCcw, Send, UserMinus, X } from "lucide-react";
+import { AlertTriangle, Check, MessageSquare, Pause, Play, RotateCcw, Send, UserMinus, X } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api/client";
 import type { Agent, AgentMessage, AgentStep, Department, Provider } from "../api/types";
@@ -148,6 +148,9 @@ function Blocked({ agent }: { agent: Agent }) {
   const queryClient = useQueryClient();
   const jobs = useOpenJobs(agent.projectId);
   const failed = jobs.data?.find((j) => j.agentId === agent.id && j.status === "FAILED");
+  const tasks = useTasks(agent.projectId);
+  const blockedTask = agent.lead ? undefined : tasks.data?.find((t) => t.assigneeId === agent.id && t.status === "BLOCKED");
+  const askLead = useMutation({ mutationFn: (taskId: string) => api.post(`/api/v1/tasks/${taskId}/lead-decision`, {}) });
   const retry = useMutation({
     mutationFn: (id: string) => api.post(`/api/v1/jobs/${id}/retry`, {}),
     onSuccess: () => {
@@ -161,9 +164,16 @@ function Blocked({ agent }: { agent: Agent }) {
       <div className="min-w-0 flex-1 text-[12px]">
         <p className="font-semibold text-danger">Blocked</p>
         <p className="mt-0.5 text-muted">{agent.blockedReason}</p>
-        <ErrorText error={retry.error} />
+        {askLead.isSuccess && <p className="mt-1 text-faint">The Lead is deciding: it answers {agent.name} and resumes the work, or asks you in its chat.</p>}
+        <ErrorText error={retry.error ?? askLead.error} />
       </div>
-      {failed && <Button size="sm" variant="ghost" disabled={retry.isPending} onClick={() => retry.mutate(failed.id)}><RotateCcw size={13} /> Retry</Button>}
+      <div className="flex shrink-0 flex-col items-end gap-1.5">
+        {blockedTask && <Button size="sm" variant="ghost" disabled={askLead.isPending || askLead.isSuccess}
+          title={`The Lead answers ${agent.name} and resumes T-${blockedTask.number}, rewrites or splits it, or asks you in its chat`}
+          onClick={() => askLead.mutate(blockedTask.id)}><MessageSquare size={13} /> Ask the Lead</Button>}
+        {failed && <Button size="sm" variant="ghost" disabled={retry.isPending} title="Runs the failed step again as it was, without an answer to the block"
+          onClick={() => retry.mutate(failed.id)}><RotateCcw size={13} /> Retry the failed step</Button>}
+      </div>
     </div>
   );
 }

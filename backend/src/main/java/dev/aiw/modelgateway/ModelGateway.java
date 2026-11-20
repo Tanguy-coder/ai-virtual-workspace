@@ -132,10 +132,11 @@ public class ModelGateway {
         }
         if (last != null) throw last;
         // The bound model is known to be out and nothing else fits: the job waits, as before routing existed.
+        long wait = Math.max(60, router.secondsUntilAvailable(provider.id(), request.model()));
         throw new ModelCallException(provider.name() + " " + request.model() + " is unavailable ("
                 + router.unavailable(provider.id(), request.model()).orElse("out of quota")
-                + ") and no other configured model fits this work: the work waits and resumes by itself.", 429, null,
-                Math.max(60, router.secondsUntilAvailable(provider.id(), request.model())));
+                + ") and no other configured model fits this work: the work waits " + (wait >= 120 ? (wait + 59) / 60 + " min" : wait + " s")
+                + " and resumes by itself.", 429, null, wait);
     }
 
     /**

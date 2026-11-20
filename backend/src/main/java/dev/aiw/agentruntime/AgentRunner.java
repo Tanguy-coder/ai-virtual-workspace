@@ -303,7 +303,8 @@ public class AgentRunner {
         } catch (RuntimeException e) {
             // Small models drop or swap a closing bracket ({"actions":[{...}]} written {"actions":[{...]}): one repair,
             // free, instead of a correction round trip. Only kept when the repaired text parses.
-            String repaired = balanceBrackets(json);
+            // T-28 (2026-11-19): a file written as JavaScript string pieces, "line 1\n" + "line 2\n": joined.
+            String repaired = balanceBrackets(joinConcatenations(json));
             try {
                 node = repaired.equals(json) ? null : LENIENT.readTree(repaired);
             } catch (RuntimeException again) {
@@ -351,6 +352,36 @@ public class AgentRunner {
         }
         if (inString) out.append('"');
         while (!open.isEmpty()) out.append(open.pop() == '{' ? '}' : ']');
+        return out.toString();
+    }
+
+    /** "abc" + "def" outside strings becomes "abcdef" (a JavaScript habit in JSON). */
+    static String joinConcatenations(String json) {
+        StringBuilder out = new StringBuilder(json.length());
+        boolean inString = false;
+        for (int i = 0; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (inString) {
+                out.append(c);
+                if (c == '\\' && i + 1 < json.length()) out.append(json.charAt(++i));
+                else if (c == '"') inString = false;
+                continue;
+            }
+            if (c == '+') {
+                int end = out.length() - 1;
+                while (end >= 0 && Character.isWhitespace(out.charAt(end))) end--;
+                int next = i + 1;
+                while (next < json.length() && Character.isWhitespace(json.charAt(next))) next++;
+                if (end >= 0 && out.charAt(end) == '"' && next < json.length() && json.charAt(next) == '"') {
+                    out.setLength(end); // drop the closing quote: the next piece continues the same string
+                    i = next;
+                    inString = true;
+                    continue;
+                }
+            }
+            if (c == '"') inString = true;
+            out.append(c);
+        }
         return out.toString();
     }
 
