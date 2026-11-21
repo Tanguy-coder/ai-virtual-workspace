@@ -43,9 +43,11 @@ public class TaskService {
     private final AuditLog audit;
     private final AgentService agents;
     private final CollaborationService collaboration;
+    private final org.springframework.beans.factory.ObjectProvider<dev.aiw.quality.SecurityService> security;
 
     TaskService(JdbcClient jdbc, JsonMapper json, EventPublisher events, AuditLog audit, AgentService agents,
-                CollaborationService collaboration) {
+                CollaborationService collaboration, org.springframework.beans.factory.ObjectProvider<dev.aiw.quality.SecurityService> security) {
+        this.security = security;
         this.jdbc = jdbc;
         this.json = json;
         this.events = events;
@@ -223,6 +225,8 @@ public class TaskService {
         setStatus(task, "CANCELLED", actor, Map.of());
         audit.record(workspaceOf(task), actor, "task.cancel", "task", taskId, AuditLog.Decision.RECORDED,
                 Map.of("number", String.valueOf(task.number())));
+        // A cancelled fix task leaves its finding open: the next scan gives it another task.
+        security.ifAvailable(sec -> sec.taskClosedWithoutFix(taskId));
         // A cancelled task is no longer awaited: its dependents may be ready now.
         jdbc.sql("SELECT task_id FROM task_dependencies WHERE depends_on_id = ?").param(taskId).query(String.class).list()
                 .forEach(id -> settle(id, actor));

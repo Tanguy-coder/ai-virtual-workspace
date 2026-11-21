@@ -332,6 +332,64 @@ public class GitService {
         return r.out().lines().limit(max).reduce("", (a, b) -> a + b + "\n");
     }
 
+    /** The files of {@code ref} written to {@code dir} (no .git): a frozen snapshot for scans and builds (docs/18). */
+    public void export(Path repo, String ref, Path dir) {
+        try {
+            Files.createDirectories(dir);
+            Path tar = dir.resolveSibling(dir.getFileName() + ".tar");
+            git(repo, "archive", "--format=tar", "-o", tar.toString(), ref);
+            Processes.Result x = Processes.run(List.of("tar", "-xf", tar.toString(), "-C", dir.toString()), null, TIMEOUT);
+            Files.deleteIfExists(tar);
+            if (!x.ok()) throw new GitException("Could not unpack " + ref + ": " + x.combined().strip());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /** Annotated tag on a commit (releases). */
+    public void tag(Path repo, String name, String commit, String message, Author author) {
+        Processes.Result r = Processes.run(List.of("git", "-c", "user.name=" + author.name(), "-c", "user.email=" + author.email(),
+                "tag", "-a", name, "-m", message, commit), repo, TIMEOUT, ENV, null);
+        if (!r.ok()) throw new GitException("git tag failed: " + r.combined().strip());
+    }
+
+    /** Tags, newest first. */
+    public List<String> tags(Path repo) {
+        return git(repo, "tag", "--sort=-creatordate").lines().filter(l -> !l.isBlank()).toList();
+    }
+
+    /** Commits of {@code ref} since {@code since} (exclusive; null: all), subjects only, newest first. */
+    public List<String> subjectsSince(Path repo, String since, String ref, int max) {
+        String range = since == null ? ref : since + ".." + ref;
+        return git(repo, "log", "--max-count=" + max, "--format=%s", range).lines().filter(l -> !l.isBlank()).toList();
+    }
+
+    public record PushOutcome(boolean ok, String detail) {}
+
+    /**
+     * Pushes main, develop and the tags to an HTTPS remote. The token goes in an HTTP header passed through the
+     * environment: never in the repository's config, the command line or the logs.
+     */
+    public PushOutcome push(Path repo, String url, String token, String tokenUser) {
+        if (url == null || !url.matches("https://[\\w.-]+(:\\d+)?/[\\w./~%-]+")) {
+            return new PushOutcome(false, "The remote must be an HTTPS URL (https://host/owner/repo.git).");
+        }
+        java.util.Map<String, String> env = new java.util.HashMap<>(ENV);
+        if (token != null && !token.isBlank()) {
+            String basic = java.util.Base64.getEncoder().encodeToString((tokenUser + ":" + token.strip())
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            env.put("GIT_CONFIG_COUNT", "1");
+            env.put("GIT_CONFIG_KEY_0", "http.extraHeader");
+            env.put("GIT_CONFIG_VALUE_0", "Authorization: Basic " + basic);
+        }
+        List<String> cmd = new ArrayList<>(List.of("git", "push", "--porcelain", url));
+        for (String b : List.of(MAIN, DEVELOP)) if (hasBranch(repo, b)) cmd.add("refs/heads/" + b + ":refs/heads/" + b);
+        cmd.add("refs/tags/*:refs/tags/*");
+        Processes.Result r = Processes.run(cmd, repo, java.time.Duration.ofMinutes(5), env, null);
+        String detail = r.combined().replaceAll("(?i)authorization: basic \\S+", "authorization: ***").strip();
+        return new PushOutcome(r.ok(), detail.length() > 1_500 ? detail.substring(0, 1_500) + "…" : detail);
+    }
+
     private void commitAs(Path dir, String message, Author author) {
         Processes.Result r = Processes.run(List.of("git", "-c", "user.name=" + author.name(), "-c", "user.email=" + author.email(),
                 "commit", "-q", "--no-verify", "-m", message), dir, TIMEOUT, ENV, null);

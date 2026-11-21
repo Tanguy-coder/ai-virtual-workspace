@@ -179,3 +179,57 @@ export interface TestRun {
 export interface Branch { name: string; head: string; ahead: number; behind: number; lastSubject: string; lastDate: string }
 export interface Commit { sha: string; author: string; date: string; subject: string }
 export interface RepoEntry { path: string; type: string; size: number }
+
+// ---- Increment 5: Security Center (docs/18)
+
+export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
+export type ScanKind = "SECRETS" | "SAST" | "DEPENDENCIES" | "DAST" | "LOAD" | "E2E";
+
+export interface Finding {
+  id: string; projectId: string; number: number; kind: ScanKind; tool: string; rule: string; severity: Severity;
+  title: string; file: string | null; line: number | null; location: string | null; evidence: string; reference: string | null;
+  recommendation: string; status: "OPEN" | "FIX_TASK" | "RISK_ACCEPTED" | "FIXED"; taskId: string | null;
+  acceptedBy: string | null; acceptedReason: string | null; createdAt: string; updatedAt: string; fixedAt: string | null;
+}
+
+export interface QualityScan {
+  id: string; projectId: string; number: number; kind: ScanKind; tool: string; ref: string; commitSha: string | null;
+  targetUrl: string | null; trigger: string; status: "RUNNING" | "DONE" | "FAILED" | "SKIPPED";
+  summary: { counts?: Record<Severity, number>; findings?: number; opened?: number; fixed?: number; reopened?: number;
+    metrics?: { p95Ms?: number | null; errorRate?: number | null; rps?: number | null; requests?: number | null; vus?: number; seconds?: number; passed?: boolean; reason?: string } };
+  error: string | null; startedAt: string; endedAt: string | null; durationMs: number | null;
+}
+
+export interface SecuritySummary {
+  enabled: boolean; scanning: boolean; open: Record<Severity, number>; blocking: number; latest: Partial<Record<ScanKind, QualityScan>>;
+}
+
+// ---- Increment 6: Deployment Center, members (docs/18)
+
+export interface Environment {
+  id: string; projectId: string; name: string; kind: string; hostPort: number; url: string;
+  status: "EMPTY" | "DEPLOYING" | "HEALTHY" | "UNHEALTHY" | "STOPPED"; currentDeploymentId: string | null; createdAt: string; updatedAt: string;
+}
+
+export interface Deployment {
+  id: string; projectId: string; environmentId: string; number: number; ref: string; commitSha: string; releaseId: string | null;
+  rollbackOf: string | null; status: "PENDING_APPROVAL" | "REJECTED" | "QUEUED" | "BUILDING" | "STARTING" | "HEALTHY" | "FAILED" | "SUPERSEDED" | "STOPPED";
+  approvalId: string | null; approvedBy: string | null; requestedByKind: string; requestedById: string; image: string | null;
+  containerPort: number | null; url: string | null; error: string | null; createdAt: string; startedAt: string | null; finishedAt: string | null;
+}
+
+export interface Release {
+  id: string; projectId: string; version: string; commitSha: string; notes: string; status: "PENDING_APPROVAL" | "RELEASED" | "REJECTED" | "FAILED";
+  approvalId: string | null; requestedByKind: string; requestedById: string; error: string | null; createdAt: string; releasedAt: string | null;
+}
+
+export interface Remote { provider: "GITHUB" | "GITLAB" | "OTHER"; url: string; hasToken: boolean; lastPushAt: string | null; lastPushOk: boolean | null; lastPushInfo: string | null }
+
+export interface DeliveryOverview {
+  environments: Environment[]; deployments: Deployment[]; releases: Release[]; remote: Remote | null;
+  proposal: { current: string | null; next: { patch: string; minor: string; major: string }; commit: string; notes: string; tasks: number } | null;
+}
+
+export interface Member { userId: string; email: string; displayName: string; role: "OWNER" | "ADMIN" | "MEMBER" | "VIEWER"; since: string }
+export interface Invitation { id: string; email: string; role: string; expiresAt: string; createdAt: string; token: string | null }
+export interface InvitationPreview { workspaceName: string; role: string; email: string; valid: boolean; reason: string | null }

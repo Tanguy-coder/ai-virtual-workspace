@@ -113,10 +113,108 @@ public class SandboxService {
 
     /** The worktree at /work: a bind mount of a host path, or the matching subpath of the data volume. */
     String mount(Path worktree) {
-        Path abs = worktree.toAbsolutePath().normalize();
-        if (dataVolume == null) return "type=bind,source=" + abs + ",target=/work";
-        if (!abs.startsWith(dataDir)) throw new SandboxException("The worktree " + abs + " is outside the data directory " + dataDir);
-        return "type=volume,source=" + dataVolume + ",target=/work,volume-subpath=" + dataDir.relativize(abs);
+        return mount(worktree, "/work", false);
+    }
+
+    /** A directory of the data dir mounted at {@code target}, as a bind (host paths) or a subpath of the data volume. */
+    String mount(Path dir, String target, boolean readOnly) {
+        Path abs = dir.toAbsolutePath().normalize();
+        String ro = readOnly ? ",readonly" : "";
+        if (dataVolume == null) return "type=bind,source=" + abs + ",target=" + target + ro;
+        if (!abs.startsWith(dataDir)) throw new SandboxException("The directory " + abs + " is outside the data directory " + dataDir);
+        return "type=volume,source=" + dataVolume + ",target=" + target + ",volume-subpath=" + dataDir.relativize(abs) + ro;
+    }
+
+    // ------------------------------------------------------------------ tools and applications (docs/18)
+
+    /**
+     * One run of a scanning tool (Gitleaks, Semgrep, OSV-Scanner, ZAP, k6) in a throwaway container: the code under
+     * analysis mounted read-only, an output directory writable, the tool's own pinned image. {@code network}: "none",
+     * "bridge" (registries, vulnerability databases) or the applications' network for dynamic tests.
+     */
+    public record ToolRun(String image, List<String> args, Path source, String sourceTarget, Path output, String outputTarget,
+                          String network, Duration timeout) {}
+
+    /** Runs the tool; its JSON report is on stdout (or in the output directory), its log on stderr. */
+    public Processes.Result runTool(ToolRun t) {
+        if (!enabled) throw new SandboxException("Sandboxes are disabled on this platform (aiw.sandbox.enabled=false)");
+        pull(t.image());
+        List<String> cmd = new ArrayList<>(List.of("docker", "run", "--rm", "--label", "aiw.tool=1", "--label", "aiw.owner=" + owner,
+                "--network", t.network() == null ? "none" : t.network(), "--cpus", "2", "--memory", "2g", "--pids-limit", "1024",
+                "--security-opt", "no-new-privileges"));
+        if (t.source() != null) cmd.addAll(List.of("--mount", mount(t.source(), t.sourceTarget(), true)));
+        if (t.output() != null) cmd.addAll(List.of("--mount", mount(t.output(), t.outputTarget(), false)));
+        cmd.add(t.image());
+        cmd.addAll(t.args());
+        return Processes.run(cmd, null, t.timeout() == null ? Duration.ofMinutes(10) : t.timeout());
+    }
+
+    private void pull(String image) {
+        if (docker("image", "inspect", image).ok()) return;
+        Processes.Result pull = Processes.run(List.of("docker", "pull", "-q", image), null, Duration.ofMinutes(20));
+        if (!pull.ok()) throw new SandboxException("Could not pull image " + image + ": " + pull.combined().strip());
+    }
+
+    /** The network deployed applications and the dynamic tests share; created on first use. */
+    public String appNetwork() {
+        String name = "aiw-apps";
+        if (!docker("network", "inspect", name).ok()) {
+            Processes.Result r = docker("network", "create", "--label", "aiw.owner=" + owner, name);
+            if (!r.ok() && !docker("network", "inspect", name).ok()) throw new SandboxException("Could not create the network " + name + ": " + r.combined().strip());
+        }
+        return name;
+    }
+
+    /** docker build of a snapshot (its Dockerfile). The build may fetch packages: it has the network, the app later has its own. */
+    public Command build(Path context, String tag, Duration timeout) {
+        if (!enabled) throw new SandboxException("Sandboxes are disabled on this platform (aiw.sandbox.enabled=false)");
+        Processes.Result r = Processes.run(List.of("docker", "build", "-q", "--label", "aiw.owner=" + owner, "-t", tag,
+                context.toAbsolutePath().toString()), null, timeout);
+        return new Command("docker build " + tag, r.exit(), r.combined(), r.timedOut(), r.durationMs());
+    }
+
+    /**
+     * Starts an application container (replacing one of the same name): on the applications' network under its name,
+     * its port published on the host. Limited like a sandbox; restarted by Docker if it crashes.
+     */
+    public Command runApp(String name, String image, int hostPort, int containerPort, java.util.Map<String, String> env) {
+        docker("rm", "-f", name);
+        List<String> cmd = new ArrayList<>(List.of("docker", "run", "-d", "--name", name, "--label", "aiw.app=1", "--label", "aiw.owner=" + owner,
+                "--network", appNetwork(), "--network-alias", name, "-p", hostPort + ":" + containerPort, "--cpus", "1",
+                "--memory", "512m", "--pids-limit", "256", "--security-opt", "no-new-privileges", "--restart", "on-failure:3"));
+        env.forEach((k, v) -> cmd.addAll(List.of("-e", k + "=" + v)));
+        cmd.add(image);
+        Processes.Result r = Processes.run(cmd, null, Duration.ofMinutes(2));
+        return new Command("docker run " + name, r.exit(), r.combined(), r.timedOut(), r.durationMs());
+    }
+
+    /** HTTP status of a URL as seen from the applications' network (0 when nothing answers). */
+    public int probe(String url) {
+        Processes.Result r = Processes.run(List.of("docker", "run", "--rm", "--network", appNetwork(), PROBE_IMAGE, "-s", "-o", "/dev/null",
+                "-w", "%{http_code}", "--max-time", "5", url), null, Duration.ofSeconds(30));
+        try {
+            return Integer.parseInt(r.out().strip());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    public static final String PROBE_IMAGE = "curlimages/curl:8.11.0";
+
+    public void ensureProbeImage() {
+        pull(PROBE_IMAGE);
+    }
+
+    public boolean appRunning(String name) {
+        return docker("inspect", "-f", "{{.State.Running}}", name).out().strip().equals("true");
+    }
+
+    public String appLogs(String name, int lines) {
+        return docker("logs", "--tail", String.valueOf(lines), name).combined();
+    }
+
+    public void stopApp(String name) {
+        docker("rm", "-f", name);
     }
 
     /** Runs one command in the container. Commands that install packages get network access for their duration. */
@@ -153,7 +251,10 @@ public class SandboxService {
 
     @jakarta.annotation.PreDestroy
     void shutdown() {
-        if (stopOnShutdown) running().values().forEach(this::stop);
+        if (!stopOnShutdown) return;
+        running().values().forEach(this::stop);
+        Processes.Result apps = docker("ps", "-aq", "--filter", "label=aiw.app", "--filter", "label=aiw.owner=" + owner);
+        if (apps.ok()) apps.out().lines().filter(l -> !l.isBlank()).forEach(this::stop);
     }
 
     /** Sandboxes of this platform (not of another one sharing the Docker daemon): run id → container id (short). */

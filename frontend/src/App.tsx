@@ -5,6 +5,7 @@ import { CodePage } from "./pages/engineering/CodePage";
 import { MergeRequestsPage } from "./pages/engineering/MergeRequestsPage";
 import { RunPage } from "./pages/engineering/RunPage";
 import { RunsPage } from "./pages/engineering/RunsPage";
+import { SecurityPage } from "./pages/engineering/SecurityPage";
 import { TestingPage } from "./pages/engineering/TestingPage";
 import { api, ApiError } from "./api/client";
 import type { User, Workspace } from "./api/types";
@@ -85,7 +86,7 @@ export function App() {
           <Route path="code" element={<CodePage />} />
           <Route path="git" element={<BranchesPage />} />
           <Route path="testing" element={<TestingPage />} />
-          <Route path="security" element={<NotAvailablePage feature="Security Center" increment={5} />} />
+          <Route path="security" element={<SecurityPage />} />
           <Route path="deployment" element={<NotAvailablePage feature="Deployment Center" increment={6} />} />
         </Route>
       </Route>

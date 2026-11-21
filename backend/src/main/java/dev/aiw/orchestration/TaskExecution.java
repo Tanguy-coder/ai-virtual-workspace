@@ -114,17 +114,21 @@ public class TaskExecution {
     private final MeetingService meetings;
     private final BranchFlow branches;
 
+    private final dev.aiw.quality.SecurityService security;
+
     TaskExecution(TaskService tasks, TaskRuns runs, AgentTools tools, AgentRunner runner, AgentJobs jobs, AgentService agents,
                   CollaborationService collaboration, MemoryService memory, GitService git, SandboxService sandboxes,
                   TestRunService tests, MergeRequestService mrs, ApprovalService approvals, ProjectService projects,
                   EventPublisher events, AuditLog audit, TransactionTemplate tx, JdbcClient jdbc, JsonMapper json,
                   BudgetService budgets, MeetingService meetings, dev.aiw.modelgateway.ModelGateway gateway, BranchFlow branches,
+                  dev.aiw.quality.SecurityService security,
                   @Value("${aiw.execution.auto-start:true}") boolean autoStart,
                   @Value("${aiw.execution.max-steps-per-segment:40}") int maxSegmentSteps,
                   @Value("${aiw.execution.token-budget:200000}") long tokenBudget,
                   @Value("${aiw.execution.takeover-token-budget:150000}") long takeoverTokens,
                   @Value("${aiw.execution.takeover-steps:30}") int takeoverSteps,
                   @Value("${aiw.execution.max-task-tokens:200000}") long maxTaskTokens) {
+        this.security = security;
         this.maxTaskTokens = maxTaskTokens;
         this.takeoverTokens = takeoverTokens;
         this.takeoverSteps = takeoverSteps;
@@ -1300,6 +1304,20 @@ public class TaskExecution {
             back(run, "Secret found in the diff", "Remove these credentials from the code (use configuration instead): "
                     + secrets.stream().map(f -> f.kind() + " in " + f.file()).reduce((a, b) -> a + "; " + b).orElse(""));
             return;
+        }
+        // A fix task (docs/18): the platform reruns the finding's tool on the branch; the finding must be gone.
+        if ("FINDING".equals(task.sourceKind()) && task.sourceId() != null) {
+            Optional<String> still;
+            try {
+                still = security.stillPresent(task.sourceId(), wt, "HEAD");
+            } catch (RuntimeException e) {
+                log.warn("Could not recheck finding {} on {}", task.sourceId(), run.branch(), e);
+                still = Optional.empty();
+            }
+            if (still.isPresent()) {
+                back(run, "The security finding is still there", still.get());
+                return;
+            }
         }
         tx.executeWithoutResult(s -> tasks.advance(task.id(), "IN_TEST", Actor.system(), Map.of("runId", run.id())));
         String head = git.head(wt);

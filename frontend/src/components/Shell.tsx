@@ -50,7 +50,7 @@ export const NAV: Record<Space, NavItem[]> = {
     { to: "code", label: "Code", icon: TerminalSquare },
     { to: "git", label: "Branches", icon: GitBranch },
     { to: "testing", label: "Testing", icon: FlaskConical },
-    { to: "security", label: "Security", icon: ShieldCheck, increment: 5 },
+    { to: "security", label: "Security", icon: ShieldCheck },
     { to: "deployment", label: "Deployment", icon: Rocket, increment: 6 },
   ],
 };

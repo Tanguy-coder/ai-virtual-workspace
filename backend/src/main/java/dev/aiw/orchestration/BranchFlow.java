@@ -8,6 +8,9 @@ import dev.aiw.governance.AuditLog;
 import dev.aiw.shared.ApiException;
 import dev.aiw.organization.Agent;
 import dev.aiw.organization.AgentService;
+import dev.aiw.quality.Finding;
+import dev.aiw.quality.SecurityService;
+import dev.aiw.quality.StaticScanCompleted;
 import dev.aiw.scm.GitService;
 import dev.aiw.shared.Actor;
 import java.nio.file.Path;
@@ -40,10 +43,15 @@ public class BranchFlow {
     private final JdbcClient jdbc;
     private final TransactionTemplate tx;
     private final AuditLog audit;
+    private final SecurityService security;
+    private final org.springframework.context.ApplicationEventPublisher appEvents;
 
     BranchFlow(GitService git, ApprovalService approvals, EventPublisher events, AgentService agents, TaskService tasks,
-               JdbcClient jdbc, TransactionTemplate tx, AuditLog audit) {
+               JdbcClient jdbc, TransactionTemplate tx, AuditLog audit, SecurityService security,
+               org.springframework.context.ApplicationEventPublisher appEvents) {
+        this.appEvents = appEvents;
         this.audit = audit;
+        this.security = security;
         this.git = git;
         this.approvals = approvals;
         this.events = events;
@@ -84,6 +92,13 @@ public class BranchFlow {
         if (!conflicts.isEmpty()) {
             return new MainMerge(false, "develop conflicts with main in " + String.join(", ", conflicts), null);
         }
+        // Security gate (docs/18): no critical or high finding goes to main, unless fixed or accepted by the CTO.
+        List<Finding> blocking = security.blocking(projectId);
+        if (!blocking.isEmpty()) {
+            return new MainMerge(false, blocking.size() + " critical or high security finding" + (blocking.size() == 1 ? " is" : "s are")
+                    + " open on develop: " + String.join("; ", blocking.stream().limit(5).map(Finding::label).toList())
+                    + ". Their fix tasks must merge first (or the CTO accepts the risk in the Security Center)", null);
+        }
         String commit = git.revParse(repo.get(), GitService.DEVELOP);
         List<String> merged = jdbc.sql("""
                 SELECT 'T-' || t.number || ' ' || t.title FROM merge_requests m JOIN tasks t ON t.id = m.task_id
@@ -104,8 +119,20 @@ public class BranchFlow {
         return new MainMerge(true, "Merge of develop into main (" + ahead + " commits) sent to the CTO for approval", id);
     }
 
-    /** Called after a task merged into develop: when no task is left open, the Lead asks for the merge into main. */
+    /**
+     * Called after a task merged into develop: develop is scanned first (docs/18); when the scan is done and no task is
+     * left open, the Lead asks for the merge into main ({@link #onStaticScan}).
+     */
     void afterTaskMerged(String workspaceId, String projectId) {
+        security.requestStaticScan(workspaceId, projectId, "merge");
+    }
+
+    @EventListener
+    void onStaticScan(StaticScanCompleted e) {
+        mainMergeWhenDone(e.workspaceId(), e.projectId());
+    }
+
+    void mainMergeWhenDone(String workspaceId, String projectId) {
         boolean open = tasks.list(projectId).stream().anyMatch(t -> !TaskService.CLOSED.contains(t.status()));
         if (open) return;
         try {
@@ -135,6 +162,7 @@ public class BranchFlow {
             payload.put("commit", merged);
             payload.put("source", commit);
             events.publish(e.workspaceId(), e.projectId(), "branch.merged", Actor.human(e.userId()), new Subject("project", e.projectId()), payload);
+            appEvents.publishEvent(new MainMerged(e.workspaceId(), e.projectId(), merged, e.userId()));
         } catch (RuntimeException ex) {
             log.warn("Merge of develop into main failed for project {}", e.projectId(), ex);
             payload.put("reason", AgentTools.clip(ex.getMessage() == null ? "unknown error" : ex.getMessage(), 500));

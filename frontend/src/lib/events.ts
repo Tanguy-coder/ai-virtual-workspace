@@ -108,6 +108,15 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
     case "provider.created": return `Provider "${p.name}" added`;
     case "provider.deleted": return `Provider "${p.name}" removed`;
     case "provider.updated": return p.economyModel ? `Economy model set to ${p.economyModel}` : "Economy model cleared";
+    case "security_scan.started": return `Security scan started: ${p.tool} (${String(p.kind).toLowerCase()})`;
+    case "security_scan.completed": return p.status === "DONE"
+      ? `${String(p.kind).toLowerCase()} scan done: ${p.findings} finding${p.findings === 1 ? "" : "s"}${p.opened ? `, ${p.opened} new` : ""}${p.fixed ? `, ${p.fixed} fixed` : ""}`
+      : `${String(p.kind).toLowerCase()} scan ${String(p.status).toLowerCase()}`;
+    case "finding.opened": return `New ${String(p.severity).toLowerCase()} finding F-${p.number}: ${p.title}`;
+    case "finding.reopened": return `Finding back (${String(p.severity).toLowerCase()}): ${p.title}`;
+    case "finding.fixed": return `A ${String(p.kind).toLowerCase()} finding is fixed: the scanner no longer sees it`;
+    case "finding.fix_task": return `Fix task T-${p.taskNumber} created for F-${p.number}: ${p.title}`;
+    case "finding.risk_accepted": return `${actor} accepted the risk of F-${p.number} (${String(p.severity).toLowerCase()}): ${p.title}`;
     case "approval.requested": return `Approval requested: ${p.summary}`;
     case "approval.granted": return `Approved: ${p.action}`;
     case "approval.denied": return `Rejected: ${p.action}`;
@@ -117,7 +126,9 @@ export function describe(e: EventRecord, names: Record<string, string> = {}): st
 
 export function tone(e: EventRecord): "danger" | "warn" | "ok" | "muted" {
   if (e.type === "test_run.completed") return e.payload.status === "PASSED" ? "ok" : "danger";
-  if (e.type === "merge_request.merged" || e.type === "branch.merged") return "ok";
+  if (e.type === "merge_request.merged" || e.type === "branch.merged" || e.type === "finding.fixed") return "ok";
+  if (e.type === "finding.opened" || e.type === "finding.reopened") return e.payload.severity === "CRITICAL" || e.payload.severity === "HIGH" ? "danger" : "warn";
+  if (e.type === "finding.risk_accepted") return "warn";
   if (e.type === "branch.merge_failed") return "danger";
   if (e.type === "message.failed" || e.payload.outcome === "ERROR" || e.type.endsWith(".failed") || e.type === "task.blocked") return "danger";
   if (e.type === "hiring_proposal.created" || e.type === "briefing.analyzed") return "warn";

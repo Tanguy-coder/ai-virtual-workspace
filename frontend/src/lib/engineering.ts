@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { Branch, Commit, FileChange, MergeRequest, RepoEntry, ReviewComment, RunStep, TaskRun, TestRun } from "../api/types";
+import type { Branch, Commit, DeliveryOverview, Deployment, FileChange, Finding, MergeRequest, QualityScan, RepoEntry, ReviewComment, RunStep, SecuritySummary, Severity, TaskRun, TestRun } from "../api/types";
 import type { Tone } from "../components/ui";
 
 export function useRuns(projectId: string) {
@@ -57,3 +57,26 @@ export const GATES: { key: string; label: string }[] = [
   { key: "secrets", label: "No secret in the code" },
   { key: "conflicts", label: "No conflict with main" },
 ];
+
+export function useSecurity(projectId: string) {
+  return useQuery({ queryKey: ["security", projectId], queryFn: () => api.get<SecuritySummary>(`/api/v1/projects/${projectId}/security`), enabled: !!projectId });
+}
+
+export function useFindings(projectId: string) {
+  return useQuery({ queryKey: ["security", projectId, "findings"], queryFn: () => api.get<Finding[]>(`/api/v1/projects/${projectId}/security/findings`), enabled: !!projectId });
+}
+
+export function useScans(projectId: string) {
+  return useQuery({ queryKey: ["security", projectId, "scans"], queryFn: () => api.get<QualityScan[]>(`/api/v1/projects/${projectId}/security/scans`), enabled: !!projectId });
+}
+
+export const SEVERITY_TONE: Record<Severity, Tone> = { CRITICAL: "danger", HIGH: "danger", MEDIUM: "warn", LOW: "muted", INFO: "muted" };
+
+export function useDelivery(projectId: string) {
+  return useQuery({ queryKey: ["delivery", projectId], queryFn: () => api.get<DeliveryOverview>(`/api/v1/projects/${projectId}/delivery`), enabled: !!projectId });
+}
+
+export const DEPLOY_TONE: Record<Deployment["status"], Tone> = {
+  PENDING_APPROVAL: "accent", REJECTED: "muted", QUEUED: "active", BUILDING: "active", STARTING: "active", HEALTHY: "ok",
+  FAILED: "danger", SUPERSEDED: "muted", STOPPED: "muted",
+};
