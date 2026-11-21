@@ -33,6 +33,25 @@ class ActionShapesTest {
         assertThat(norm("{\"tool\": \"repo.tree\"}").path("tool").asString()).isEqualTo("repo.tree");
     }
 
+    /** Seen on T-32 (2026-11-21): "repo.exec" rejected as an unusable reply, a model round trip for a name. */
+    @Test
+    void toolNamesSmallModelsWriteAreResolved() {
+        assertThat(norm("{\"tool\": \"repo.exec\", \"args\": {\"command\": \"npm test\"}}").path("tool").asString()).isEqualTo("exec");
+        assertThat(AgentTools.resolve("functions.file.read")).isEqualTo("file.read");
+        assertThat(AgentTools.resolve("read_file")).isEqualTo("file.read");
+        assertThat(AgentTools.resolve("readFile")).isEqualTo("file.read");
+        assertThat(AgentTools.resolve("file_read")).isEqualTo("file.read");
+        assertThat(AgentTools.resolve("run_command")).isEqualTo("exec");
+        assertThat(AgentTools.resolve("list_files")).isEqualTo("repo.tree");
+        assertThat(norm("{\"repo.exec\": {\"command\": \"npm test\"}}").path("tool").asString()).isEqualTo("exec");
+        // A guess never deletes: only the exact name (or its separators) reaches file.delete.
+        assertThat(AgentTools.resolve("delete_file")).isNull();
+        assertThat(AgentTools.resolve("repo.file.delete")).isNull();
+        assertThat(AgentTools.resolve("file_delete")).isEqualTo("file.delete");
+        assertThat(AgentTools.resolve("rm")).isNull();
+        assertThat(AgentTools.resolve("deploy")).isNull();
+    }
+
     @Test
     void ambiguousShapesAreLeftForTheModelToFix() {
         assertThat(norm("{\"file.read\": {}, \"exec\": {}}").path("tool").isMissingNode()).isTrue();

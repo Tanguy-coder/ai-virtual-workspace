@@ -65,6 +65,45 @@ class AgentTools {
     static final Set<String> TOOLS = Set.of("repo.tree", "code.search", "file.read", "file.write", "file.edit",
             "file.delete", "exec", "git.commit", "task.submit", "task.block", "message.send", "memory.record",
             "task.handback");
+    /** Names small models write for a tool, mapped by code (never to file.delete: a guess must not destroy). */
+    private static final Map<String, String> SYNONYMS = Map.ofEntries(
+            Map.entry("run", "exec"), Map.entry("shell", "exec"), Map.entry("bash", "exec"), Map.entry("sh", "exec"),
+            Map.entry("command", "exec"), Map.entry("cmd", "exec"), Map.entry("execute", "exec"), Map.entry("run.command", "exec"),
+            Map.entry("run.tests", "exec"), Map.entry("terminal", "exec"),
+            Map.entry("read", "file.read"), Map.entry("read.file", "file.read"), Map.entry("cat", "file.read"),
+            Map.entry("open.file", "file.read"), Map.entry("view.file", "file.read"),
+            Map.entry("write", "file.write"), Map.entry("write.file", "file.write"), Map.entry("create.file", "file.write"),
+            Map.entry("edit", "file.edit"), Map.entry("edit.file", "file.edit"), Map.entry("patch", "file.edit"),
+            Map.entry("tree", "repo.tree"), Map.entry("ls", "repo.tree"), Map.entry("list.files", "repo.tree"),
+            Map.entry("list", "repo.tree"), Map.entry("list.dir", "repo.tree"),
+            Map.entry("search", "code.search"), Map.entry("grep", "code.search"), Map.entry("search.code", "code.search"),
+            Map.entry("commit", "git.commit"), Map.entry("submit", "task.submit"), Map.entry("block", "task.block"),
+            Map.entry("handback", "task.handback"), Map.entry("send.message", "message.send"), Map.entry("remember", "memory.record"));
+
+    /**
+     * The tool a name means, when that is unambiguous: "repo.exec" (seen 2026-11-21), "functions.file.read", "file_read",
+     * "readFile", "run_command". Null when it means no tool: the model is then told the list, as before. Costs nothing,
+     * where an unusable reply costs a correction round trip.
+     */
+    static String resolve(String name) {
+        if (name == null || name.isBlank()) return null;
+        if (TOOLS.contains(name)) return name;
+        String n = name.strip().replaceAll("([a-z])([A-Z])", "$1.$2").toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", ".").replaceAll("^\\.|\\.$", "");
+        String[] parts = n.split("\\.");
+        // Longest known suffix first: a namespace in front ("repo.exec", "functions.file.read", "tools.exec").
+        for (int i = 0; i < parts.length; i++) {
+            String suffix = String.join(".", java.util.Arrays.copyOfRange(parts, i, parts.length));
+            if (TOOLS.contains(suffix) && (i == 0 || !suffix.equals("file.delete"))) return suffix;
+            if (SYNONYMS.containsKey(suffix)) return SYNONYMS.get(suffix);
+            if (parts.length - i == 2) {
+                String swapped = parts[i + 1] + "." + parts[i]; // "read.file" → "file.read"
+                if (TOOLS.contains(swapped) && !swapped.equals("file.delete")) return swapped;
+            }
+        }
+        return null;
+    }
+
     private static final Set<String> SKIP = Set.of(".git", "node_modules", "__pycache__", ".venv", "target", "dist");
     private static final int MAX_READ_LINES = 200;
     private static final tools.jackson.databind.json.JsonMapper JSON = tools.jackson.databind.json.JsonMapper.builder().build();
@@ -119,7 +158,7 @@ class AgentTools {
                                 args.path("to").asInt(Math.max(1, args.path("from").asInt(1))), text(args, "new", null))
                         : edit(ws, text(args, "path", ""), text(args, "old", null), text(args, "new", null)));
                 case "file.delete" -> delete(ws, text(args, "path", ""));
-                case "exec" -> exec(ws, text(args, "command", ""));
+                case "exec" -> exec(ws, text(args, "command", text(args, "cmd", "")));
                 case "git.commit" -> commit(ws, text(args, "message", "Work in progress"));
                 default -> Result.refused(tool, "Unknown tool " + tool + ".");
             };

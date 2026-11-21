@@ -475,9 +475,8 @@ public class TaskExecution {
 
     /** Native tool names cannot contain dots: "file_write" is our "file.write". */
     private static String toolName(String name) {
-        if (AgentTools.TOOLS.contains(name)) return name;
-        String dotted = name.replaceFirst("_", ".");
-        return AgentTools.TOOLS.contains(dotted) ? dotted : name;
+        String known = AgentTools.resolve(name);
+        return known == null ? name : known;
     }
 
     private int unusableInARow(TaskRun run) {
@@ -561,8 +560,8 @@ public class TaskExecution {
         ObjectNode out = o.objectNode();
         String tool = null;
         for (String key : List.of("tool", "name", "action", "tool_name", "function")) {
-            String v = o.path(key).asString("");
-            if (AgentTools.TOOLS.contains(v)) {
+            String v = AgentTools.resolve(o.path(key).asString(""));
+            if (v != null) {
                 tool = v;
                 break;
             }
@@ -578,9 +577,9 @@ public class TaskExecution {
         } else {
             // {"task.block": {"reason": "..."}}: one known tool as the only key (besides an empty "tool").
             List<String> keys = o.propertyNames().stream().filter(k -> !(k.equals("tool") && o.path(k).asString("").isBlank())).toList();
-            if (keys.size() == 1 && AgentTools.TOOLS.contains(keys.getFirst())) {
-                tool = keys.getFirst();
-                args = o.path(tool).isObject() ? o.path(tool) : o.objectNode();
+            if (keys.size() == 1 && AgentTools.resolve(keys.getFirst()) != null) {
+                tool = AgentTools.resolve(keys.getFirst());
+                args = o.path(keys.getFirst()).isObject() ? o.path(keys.getFirst()) : o.objectNode();
             }
         }
         if (tool == null) return a;
