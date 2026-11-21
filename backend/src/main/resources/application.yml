@@ -31,11 +31,33 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
+  # Increment 6 (docs/18): Prometheus scrapes /actuator/prometheus with the bearer token AIW_METRICS_TOKEN (no token:
+  # refused). Traces go over OTLP only when AIW_OTLP_ENDPOINT is set (Jaeger in the observability profile).
+  tracing:
+    sampling:
+      probability: ${AIW_TRACE_SAMPLING:1.0}
+    export:
+      enabled: ${AIW_TRACING_EXPORT:false}
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: ${AIW_OTLP_ENDPOINT:http://localhost:4318/v1/traces}
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  logging:
+    export:
+      otlp:
+        enabled: false
 
 aiw:
   security:
     master-key: ${AIW_MASTER_KEY}
+    # Bearer token Prometheus sends to read /actuator/prometheus; empty: the endpoint refuses everyone.
+    metrics-token: ${AIW_METRICS_TOKEN:}
     # Increment 5 (docs/18): scanners in throwaway containers after each merge into develop and each deployment.
     scans-enabled: ${AIW_SECURITY_SCANS:true}
     static-kinds: SECRETS,SAST,DEPENDENCIES

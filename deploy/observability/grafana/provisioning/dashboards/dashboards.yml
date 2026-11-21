@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: aiw
+    folder: AI Engineering Workspace
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

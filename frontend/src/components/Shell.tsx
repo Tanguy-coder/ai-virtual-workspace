@@ -51,7 +51,7 @@ export const NAV: Record<Space, NavItem[]> = {
     { to: "git", label: "Branches", icon: GitBranch },
     { to: "testing", label: "Testing", icon: FlaskConical },
     { to: "security", label: "Security", icon: ShieldCheck },
-    { to: "deployment", label: "Deployment", icon: Rocket, increment: 6 },
+    { to: "deployment", label: "Deployment", icon: Rocket },
   ],
 };
 

@@ -34,10 +34,25 @@ public class PricingService {
                 .list();
     }
 
+    /**
+     * The price of a model: its exact id, else the same id without a provider prefix (openai/gpt-oss-120b) or a date
+     * suffix (gpt-4.1-mini-2025-04-14, claude-x-20250101): providers report the dated snapshot they served.
+     */
     public Optional<Price> find(String workspaceId, ProviderKind kind, String model) {
-        return list(workspaceId).stream()
-                .filter(p -> p.providerKind().equals(kind.name()) && p.model().equals(model))
-                .findFirst();
+        if (model == null) return Optional.empty();
+        List<Price> prices = list(workspaceId).stream().filter(p -> p.providerKind().equals(kind.name())).toList();
+        for (String candidate : candidates(model)) {
+            Optional<Price> hit = prices.stream().filter(p -> p.model().equalsIgnoreCase(candidate)).findFirst();
+            if (hit.isPresent()) return hit;
+        }
+        return Optional.empty();
+    }
+
+    static List<String> candidates(String model) {
+        String m = model.strip();
+        String noPrefix = m.contains("/") ? m.substring(m.lastIndexOf('/') + 1) : m;
+        String noDate = noPrefix.replaceFirst("-(\\d{4}-\\d{2}-\\d{2}|\\d{8})$", "");
+        return List.of(m, noPrefix, noDate).stream().distinct().toList();
     }
 
     @Transactional

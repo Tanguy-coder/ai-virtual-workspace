@@ -49,6 +49,10 @@ services:
       AIW_SANDBOX_DATA_VOLUME: aiw_aiwdata
       # Existing projects to import (docs/17): put a folder in ./imports, then choose it when creating a project.
       AIW_IMPORT_DIR: /imports
+      # Increment 6 (docs/18): Prometheus reads /actuator/prometheus with this token; traces go to Jaeger when exported.
+      AIW_METRICS_TOKEN: ${AIW_METRICS_TOKEN:-}
+      AIW_TRACING_EXPORT: ${AIW_TRACING_EXPORT:-false}
+      AIW_OTLP_ENDPOINT: ${AIW_OTLP_ENDPOINT:-http://jaeger:4318/v1/traces}
     ports:
       - "8090:8090"
     volumes:
@@ -77,7 +81,49 @@ services:
       backend:
         condition: service_started
 
+  # Observability (docs/18): docker compose --env-file .env --profile observability up -d
+  # Set AIW_TRACING_EXPORT=true in .env to send traces to Jaeger.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    environment:
+      AIW_METRICS_TOKEN: ${AIW_METRICS_TOKEN:-}
+    entrypoint: ["/bin/sh", "-c", "printf '%s' \"$$AIW_METRICS_TOKEN\" > /prometheus/token && exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d"]
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      backend:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${AIW_GRAFANA_PASSWORD:-change-me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3300:3000"
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.63.0
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"
+
 volumes:
+  promdata:
+  grafanadata:
   pgdata:
   redisdata:
   aiwdata:

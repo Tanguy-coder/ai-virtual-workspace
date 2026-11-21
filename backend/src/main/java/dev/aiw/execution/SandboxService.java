@@ -180,7 +180,7 @@ public class SandboxService {
     public Command runApp(String name, String image, int hostPort, int containerPort, java.util.Map<String, String> env) {
         docker("rm", "-f", name);
         List<String> cmd = new ArrayList<>(List.of("docker", "run", "-d", "--name", name, "--label", "aiw.app=1", "--label", "aiw.owner=" + owner,
-                "--network", appNetwork(), "--network-alias", name, "-p", hostPort + ":" + containerPort, "--cpus", "1",
+                "--network", appNetwork(), "--network-alias", name, "-p", "127.0.0.1:" + hostPort + ":" + containerPort, "--cpus", "1",
                 "--memory", "512m", "--pids-limit", "256", "--security-opt", "no-new-privileges", "--restart", "on-failure:3"));
         env.forEach((k, v) -> cmd.addAll(List.of("-e", k + "=" + v)));
         cmd.add(image);

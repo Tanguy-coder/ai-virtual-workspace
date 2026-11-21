@@ -1,0 +1,11 @@
+# Scrapes the platform's metrics (docs/18). The token is written to /prometheus/token from AIW_METRICS_TOKEN.
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: aiw-backend
+    metrics_path: /actuator/prometheus
+    authorization:
+      type: Bearer
+      credentials_file: /prometheus/token
+    static_configs:
+      - targets: ["backend:8090"]

@@ -1,0 +1,8 @@
+AI Engineering Workspace is installed.
+{{- if .Values.ingress.enabled }}
+Open https://{{ .Values.ingress.host }}
+{{- else }}
+kubectl port-forward svc/frontend 5180:80   then open http://localhost:5180
+{{- end }}
+Sandboxes use the Docker daemon at {{ .Values.sandbox.dockerHost }}: agents' code never runs in the API pod.
+Prometheus: scrape backend:8090/actuator/prometheus with "Authorization: Bearer <secrets.metricsToken>".

@@ -1,0 +1,54 @@
+# AI Engineering Workspace on Kubernetes (docs/18). One release per namespace: the frontend's nginx reaches the API
+# through the Service named "backend".
+
+image:
+  backend: aiw-backend:latest
+  frontend: aiw-frontend:latest
+  pullPolicy: IfNotPresent
+
+# Secrets: give existing values (helm install --set secrets.dbPassword=... ) or an existing Secret with the same keys.
+secrets:
+  existingSecret: ""
+  dbPassword: ""
+  # 32 bytes, base64: encrypts provider keys and project secrets at rest. Losing it makes them unreadable.
+  masterKey: ""
+  metricsToken: ""
+
+backend:
+  replicas: 1
+  allowedOrigins: "https://aiw.example.com"
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { memory: 2Gi }
+  dataStorage: 20Gi
+  storageClass: ""
+  tracing:
+    export: false
+    otlpEndpoint: ""
+
+# Agents' code runs in Docker sandboxes, never in the API process: the backend needs a Docker daemon.
+# Point it at a dedicated rootless daemon or a DinD sidecar; never at a production node's socket.
+sandbox:
+  enabled: true
+  dockerHost: "tcp://aiw-docker:2376"
+  dockerTlsSecret: ""
+
+frontend:
+  replicas: 1
+
+postgres:
+  enabled: true
+  image: pgvector/pgvector:pg16
+  storage: 10Gi
+  storageClass: ""
+
+redis:
+  enabled: true
+  image: redis:7-alpine
+
+ingress:
+  enabled: false
+  className: ""
+  host: aiw.example.com
+  tls: []
+  annotations: {}

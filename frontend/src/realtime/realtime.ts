@@ -52,6 +52,10 @@ function keysFor(e: EventRecord): unknown[][] {
   if (p && e.type.startsWith("branch.")) keys.push(["branches", p], ["repo", p]);
   if (p && e.type === "test_run.completed") keys.push(["test-runs", p], ["mr"]);
   if (p && (e.type.startsWith("security_scan.") || e.type.startsWith("finding."))) keys.push(["security", p], ["tasks", p]);
+  if (p && (e.type.startsWith("deployment.") || e.type.startsWith("release.") || e.type.startsWith("environment.") || e.type.startsWith("remote."))) {
+    keys.push(["delivery", p], ["deployment-log"]);
+  }
+  if (e.type.startsWith("member.")) keys.push(["members", e.workspaceId], ["invitations", e.workspaceId]);
   if (p && e.type.startsWith("merge_request.")) {
     keys.push(["merge-requests", p], ["mr", e.subject.id], ["tasks", p], ["branches", p], ["run", e.payload.taskId]);
     if (e.type === "merge_request.merged") keys.push(["repo", p]);

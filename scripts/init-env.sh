@@ -12,5 +12,8 @@ AIW_DB_PASSWORD=$(openssl rand -hex 24)
 # 32-byte key, base64. Encrypts provider API keys and project secrets at rest.
 # Losing it makes stored secrets unreadable.
 AIW_MASTER_KEY=$(openssl rand -base64 32)
+# Bearer token Prometheus uses to read the platform's metrics (docs/18).
+AIW_METRICS_TOKEN=$(openssl rand -hex 24)
+AIW_GRAFANA_PASSWORD=$(openssl rand -hex 12)
 EOF
 echo ".env created."

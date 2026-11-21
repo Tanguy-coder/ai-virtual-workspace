@@ -2,8 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
 import { useParams, useSearchParams } from "react-router";
 import { api } from "../api/client";
-import type { BudgetView, Price, Project, Provider, ProviderKind, TestResult } from "../api/types";
-import { Badge, Button, Card, ErrorText, Field, Input, PageHeader } from "../components/ui";
+import type { BudgetView, Invitation, Member, Price, Project, Provider, ProviderKind, TestResult } from "../api/types";
+import { Badge, Button, Card, ErrorText, Field, Input, PageHeader, Select, Table } from "../components/ui";
+import { useMe } from "../App";
 import { usd } from "../lib/format";
 import { usePresets, useProviderModels } from "../lib/providers";
 
@@ -19,6 +20,7 @@ export function SettingsPage() {
         </div>
       )}
       <Providers workspaceId={workspaceId} />
+      <Members workspaceId={workspaceId} />
       <Budgets workspaceId={workspaceId} />
       <Prices workspaceId={workspaceId} />
     </div>
@@ -249,6 +251,94 @@ function Prices({ workspaceId }: { workspaceId: string }) {
         <Button variant="ghost" disabled={!form.model || !form.in || !form.out || save.isPending} onClick={() => save.mutate()}>Set price</Button>
       </div>
       <ErrorText error={save.error} />
+    </Card>
+  );
+}
+
+const ROLES = ["OWNER", "ADMIN", "MEMBER", "VIEWER"] as const;
+const ROLE_HINT: Record<string, string> = {
+  OWNER: "everything, including owners", ADMIN: "approvals, members, providers", MEMBER: "works on projects", VIEWER: "reads only",
+};
+
+/** Several humans per workspace (docs/18): members, roles, invitation links (no e-mail is sent: pass the link on). */
+function Members({ workspaceId }: { workspaceId: string }) {
+  const qc = useQueryClient();
+  const me = useMe();
+  const members = useQuery({ queryKey: ["members", workspaceId], queryFn: () => api.get<Member[]>(`/api/v1/workspaces/${workspaceId}/members`) });
+  const mine = members.data?.find((m) => m.userId === me.data?.id)?.role;
+  const admin = mine === "OWNER" || mine === "ADMIN";
+  const invitations = useQuery({
+    queryKey: ["invitations", workspaceId],
+    queryFn: () => api.get<Invitation[]>(`/api/v1/workspaces/${workspaceId}/invitations`),
+    enabled: admin,
+  });
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("MEMBER");
+  const [link, setLink] = useState<string | null>(null);
+  const refresh = () => { qc.invalidateQueries({ queryKey: ["members", workspaceId] }); qc.invalidateQueries({ queryKey: ["invitations", workspaceId] }); };
+  const invite = useMutation({
+    mutationFn: () => api.post<Invitation>(`/api/v1/workspaces/${workspaceId}/invitations`, { email, role }),
+    onSuccess: (inv) => { setLink(`${window.location.origin}/invite/${inv.token}`); setEmail(""); refresh(); },
+  });
+  const change = useMutation({ mutationFn: (v: { userId: string; role: string }) => api.put(`/api/v1/workspaces/${workspaceId}/members/${v.userId}`, { role: v.role }), onSuccess: refresh });
+  const remove = useMutation({ mutationFn: (userId: string) => api.del(`/api/v1/workspaces/${workspaceId}/members/${userId}`), onSuccess: refresh });
+  const revoke = useMutation({ mutationFn: (id: string) => api.del(`/api/v1/workspaces/${workspaceId}/invitations/${id}`), onSuccess: refresh });
+
+  return (
+    <Card title="Members" subtitle="Owners and admins decide (approvals, members, providers); members work; viewers read.">
+      <Table head={["Name", "E-mail", "Role", ""]}>
+        {(members.data ?? []).map((m) => (
+          <tr key={m.userId}>
+            <td>{m.displayName}{m.userId === me.data?.id ? <span className="text-muted"> (you)</span> : ""}</td>
+            <td className="text-muted">{m.email}</td>
+            <td>
+              {admin && m.userId !== me.data?.id && (mine === "OWNER" || m.role !== "OWNER") ? (
+                <Select value={m.role} onChange={(e) => change.mutate({ userId: m.userId, role: e.target.value })}>
+                  {ROLES.filter((r) => mine === "OWNER" || (r !== "OWNER" && (r !== "ADMIN" || m.role === "ADMIN"))).map((r) => <option key={r} value={r}>{r.toLowerCase()}</option>)}
+                </Select>
+              ) : <span title={ROLE_HINT[m.role]}>{m.role.toLowerCase()}</span>}
+            </td>
+            <td className="text-right">
+              {!(m.role === "OWNER" && (members.data ?? []).filter((x) => x.role === "OWNER").length === 1)
+                && (m.userId === me.data?.id || (admin && (mine === "OWNER" || m.role !== "OWNER"))) && (
+                <Button variant="ghost" size="sm" onClick={() => remove.mutate(m.userId)}>{m.userId === me.data?.id ? "Leave" : "Remove"}</Button>
+              )}
+            </td>
+          </tr>
+        ))}
+      </Table>
+      <ErrorText error={change.error ?? remove.error} />
+      {admin && (
+        <div className="mt-4 border-t border-line pt-4">
+          <div className="grid gap-3 md:grid-cols-[1fr_160px_auto] md:items-end">
+            <Field label="Invite by e-mail"><Input type="email" value={email} placeholder="name@company.com" onChange={(e) => setEmail(e.target.value)} /></Field>
+            <Field label="Role">
+              <Select value={role} onChange={(e) => setRole(e.target.value)}>
+                {(mine === "OWNER" ? ["ADMIN", "MEMBER", "VIEWER"] : ["MEMBER", "VIEWER"]).map((r) => <option key={r} value={r} title={ROLE_HINT[r]}>{r.toLowerCase()}</option>)}
+              </Select>
+            </Field>
+            <Button variant="primary" disabled={!email.trim() || invite.isPending} onClick={() => invite.mutate()}>Create the link</Button>
+          </div>
+          <ErrorText error={invite.error} />
+          {link && (
+            <div className="mt-3 rounded border border-accent/40 bg-accent/10 p-3 text-[13px]">
+              Send this link to the person (valid 7 days, for that e-mail only). It is shown once:
+              <div className="mt-1 break-all font-mono text-[12px]">{link}</div>
+            </div>
+          )}
+          {!!invitations.data?.length && (
+            <ul className="mt-3 space-y-1 text-[13px]">
+              {invitations.data.map((i) => (
+                <li key={i.id} className="flex items-center gap-3">
+                  <span>{i.email}</span><Badge>{i.role.toLowerCase()}</Badge>
+                  <span className="text-muted">pending · expires {new Date(i.expiresAt).toLocaleDateString()}</span>
+                  <Button className="ml-auto" variant="ghost" size="sm" onClick={() => revoke.mutate(i.id)}>Revoke</Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </Card>
   );
 }

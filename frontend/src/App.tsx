@@ -5,6 +5,8 @@ import { CodePage } from "./pages/engineering/CodePage";
 import { MergeRequestsPage } from "./pages/engineering/MergeRequestsPage";
 import { RunPage } from "./pages/engineering/RunPage";
 import { RunsPage } from "./pages/engineering/RunsPage";
+import { DeploymentPage } from "./pages/engineering/DeploymentPage";
+import { InvitePage, pendingInvite } from "./pages/InvitePage";
 import { SecurityPage } from "./pages/engineering/SecurityPage";
 import { TestingPage } from "./pages/engineering/TestingPage";
 import { api, ApiError } from "./api/client";
@@ -19,7 +21,6 @@ import { LeadBriefingPage } from "./pages/LeadBriefingPage";
 import { MeetingsPage } from "./pages/MeetingsPage";
 import { MemoryPage } from "./pages/MemoryPage";
 import { TasksPage } from "./pages/TasksPage";
-import { NotAvailablePage } from "./pages/NotAvailablePage";
 import { OfficePage } from "./pages/OfficePage";
 import { OnboardingPage } from "./pages/OnboardingPage";
 import { OrgChartPage } from "./pages/OrgChartPage";
@@ -49,6 +50,7 @@ export function App() {
     return (
       <Routes>
         <Route path="/register" element={<AuthPage mode="register" />} />
+        <Route path="/invite/:token" element={<InvitePage signedIn={false} />} />
         <Route path="*" element={<AuthPage mode="login" />} />
       </Routes>
     );
@@ -60,6 +62,7 @@ export function App() {
   return (
     <Routes>
       <Route path="/onboarding" element={<OnboardingPage />} />
+      <Route path="/invite/:token" element={<InvitePage signedIn />} />
       <Route path="/w/:workspaceId" element={<Shell />}>
         <Route index element={<Navigate to="projects" replace />} />
         <Route path="projects" element={<ProjectsPage />} />
@@ -87,10 +90,10 @@ export function App() {
           <Route path="git" element={<BranchesPage />} />
           <Route path="testing" element={<TestingPage />} />
           <Route path="security" element={<SecurityPage />} />
-          <Route path="deployment" element={<NotAvailablePage feature="Deployment Center" increment={6} />} />
+          <Route path="deployment" element={<DeploymentPage />} />
         </Route>
       </Route>
-      <Route path="*" element={<Navigate to={first ? `/w/${first.id}/projects` : "/onboarding"} replace />} />
+      <Route path="*" element={<Navigate to={pendingInvite() ? `/invite/${pendingInvite()}` : first ? `/w/${first.id}/projects` : "/onboarding"} replace />} />
     </Routes>
   );
 }

@@ -25,11 +25,17 @@ class SecurityConfig {
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http,
-                                            @Value("${aiw.web.allowed-origins}") String[] origins) throws Exception {
+                                            @Value("${aiw.web.allowed-origins}") String[] origins,
+                                            @Value("${aiw.security.metrics-token:}") String metricsToken) throws Exception {
         http
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/csrf").permitAll()
                         .requestMatchers("/actuator/health").permitAll()
+                        // Prometheus reads the metrics with a bearer token (docs/18); without a configured token, nobody does.
+                        .requestMatchers("/actuator/prometheus").access((a, ctx) ->
+                                new org.springframework.security.authorization.AuthorizationDecision(bearerMatches(ctx.getRequest(), metricsToken)))
+                        // What an invitation link is for, before signing in (the token is the secret).
+                        .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/invitations/*").permitAll()
                         .requestMatchers("/api/**", "/ws/**").authenticated()
                         .anyRequest().denyAll())
                 .csrf(csrf -> csrf.spa())
@@ -41,6 +47,14 @@ class SecurityConfig {
                         .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'none'; frame-ancestors 'none'"))
                         .referrerPolicy(r -> r.policy(ReferrerPolicyHeaderWriter.ReferrerPolicy.NO_REFERRER)));
         return http.build();
+    }
+
+    static boolean bearerMatches(jakarta.servlet.http.HttpServletRequest request, String token) {
+        if (token == null || token.isBlank()) return false;
+        String header = request.getHeader("Authorization");
+        if (header == null || !header.startsWith("Bearer ")) return false;
+        return java.security.MessageDigest.isEqual(header.substring(7).strip().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                token.strip().getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     @Bean
