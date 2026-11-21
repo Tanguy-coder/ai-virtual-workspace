@@ -77,8 +77,10 @@ public class ModelGateway {
         double floor = need == ModelProfiles.Need.LIGHT ? 3 : Math.max(Math.min(ModelRouter.FLOOR, primary), primary - 3);
         java.util.Set<String> tried = new java.util.HashSet<>();
         ModelCallException last = null;
+        boolean noCredit = false; // a stronger model is out for good (credits, key): waiting will not bring it back
         for (int hop = 0; ; hop++) {
             java.util.Optional<String> away = router.unavailable(provider.id(), request.model());
+            if (away.isPresent() && (away.get().contains("credits exhausted") || away.get().contains("key refused"))) noCredit = true;
             if (away.isEmpty()) {
                 try {
                     return completeOn(provider, request);
@@ -96,7 +98,8 @@ public class ModelGateway {
             if (hop >= MAX_HOPS) break;
             long context = request.promptTokensEstimate() + Math.min(request.maxTokens(), 4_096);
             var ranking = router.ranking(request.workspaceId(), need, (p, m) -> tried.contains(p + "|" + m), context, null, floor);
-            if (ranking.isEmpty() && last != null && (outOfCredits(last) || java.util.Set.of(401, 402, 403).contains(last.statusCode()))) {
+            if (last != null && (outOfCredits(last) || java.util.Set.of(401, 402, 403).contains(last.statusCode()))) noCredit = true;
+            if (ranking.isEmpty() && noCredit) {
                 // The stronger models have no credit (or key) left: that does not come back by waiting. The best model
                 // still usable above the absolute floor does the work rather than the project stopping (2026-11-21).
                 ranking = router.ranking(request.workspaceId(), need, (p, m) -> tried.contains(p + "|" + m), context, null, ModelRouter.FLOOR);
