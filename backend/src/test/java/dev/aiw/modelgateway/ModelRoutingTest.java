@@ -102,6 +102,11 @@ class ModelRoutingTest {
     void failuresSayHowLongTheModelIsOut() {
         assertThat(ModelGateway.unavailableFor(new ModelCallException("Groq daily limit reached", 429, null, 1_620)))
                 .isEqualTo(Duration.ofSeconds(1_620));
+        // OpenAI with no credit left says 429: the whole provider is out for an hour, no rate-limit wait (2026-11-21).
+        ModelCallException noCredit = new ModelCallException("Provider error 429: {\"error\": {\"type\": \"insufficient_quota\", \"code\": \"credit_balance_exhausted\"}}", 429, null);
+        assertThat(ModelGateway.outOfCredits(noCredit)).isTrue();
+        assertThat(ModelGateway.unavailableFor(noCredit)).isEqualTo(java.time.Duration.ofHours(1));
+        assertThat(ModelGateway.outOfCredits(new ModelCallException("Rate limit reached, try again", 429, null))).isFalse();
         assertThat(ModelGateway.unavailableFor(new ModelCallException("Provider error 402: credits", 402, null)))
                 .isEqualTo(Duration.ofHours(1));
         assertThat(ModelGateway.unavailableFor(new ModelCallException("larger than what Groq allows per minute", 413, null)))

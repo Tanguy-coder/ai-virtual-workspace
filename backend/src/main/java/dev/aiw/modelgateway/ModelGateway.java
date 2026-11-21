@@ -85,7 +85,7 @@ public class ModelGateway {
                 } catch (ModelCallException e) {
                     java.time.Duration out = unavailableFor(e);
                     if (out == null) throw e;
-                    boolean wholeProvider = e.statusCode() == 401 || e.statusCode() == 402 || e.statusCode() == 403;
+                    boolean wholeProvider = e.statusCode() == 401 || e.statusCode() == 402 || e.statusCode() == 403 || outOfCredits(e);
                     if (!out.isZero()) {
                         router.markExhausted(provider.id(), wholeProvider ? null : request.model(), out, reasonOf(e));
                     }
@@ -96,6 +96,11 @@ public class ModelGateway {
             if (hop >= MAX_HOPS) break;
             long context = request.promptTokensEstimate() + Math.min(request.maxTokens(), 4_096);
             var ranking = router.ranking(request.workspaceId(), need, (p, m) -> tried.contains(p + "|" + m), context, null, floor);
+            if (ranking.isEmpty() && last != null && (outOfCredits(last) || java.util.Set.of(401, 402, 403).contains(last.statusCode()))) {
+                // The stronger models have no credit (or key) left: that does not come back by waiting. The best model
+                // still usable above the absolute floor does the work rather than the project stopping (2026-11-21).
+                ranking = router.ranking(request.workspaceId(), need, (p, m) -> tried.contains(p + "|" + m), context, null, ModelRouter.FLOOR);
+            }
             if (ranking.isEmpty()) {
                 log.info("{} {} unavailable: no other model fits {} work (floor {}, context {} tokens, candidates {}; best below the floor: {})",
                         provider.name(), request.model(), need, floor, context, router.candidates(request.workspaceId()).stream()
@@ -147,7 +152,7 @@ public class ModelGateway {
         String m = e.getMessage() == null ? "" : e.getMessage();
         int status = e.statusCode();
         if (status == 429 && e.retryAfterSeconds() > 0) return java.time.Duration.ofSeconds(e.retryAfterSeconds());
-        if (status == 402 || status == 401 || status == 403) return java.time.Duration.ofHours(1);
+        if (status == 402 || status == 401 || status == 403 || outOfCredits(e)) return java.time.Duration.ofHours(1);
         if (status == 404 || (status == 400 && (m.contains("decommissioned") || m.contains("model_not_found")
                 || m.contains("does not exist")))) {
             return java.time.Duration.ofHours(24);
@@ -159,8 +164,19 @@ public class ModelGateway {
         return null;
     }
 
+    /**
+     * The account has no credit left: OpenAI says 429 insufficient_quota (seen 2026-11-21: each call waited ~78 s of
+     * rate-limit retries, then the next model of the same empty account was tried). The whole provider is out.
+     */
+    static boolean outOfCredits(ModelCallException e) {
+        String m = e.getMessage() == null ? "" : e.getMessage();
+        return e.statusCode() == 429 && (m.contains("insufficient_quota") || m.contains("credit_balance_exhausted")
+                || m.contains("no credits remaining") || m.contains("exceeded your current quota"));
+    }
+
     private static String reasonOf(ModelCallException e) {
         String m = e.getMessage() == null ? "" : e.getMessage();
+        if (outOfCredits(e)) return "credits exhausted";
         if (e.statusCode() == 429 && m.contains("daily")) return "daily quota reached";
         if (e.statusCode() == 402) return "credits exhausted";
         if (e.statusCode() == 401 || e.statusCode() == 403) return "key refused";
@@ -249,6 +265,8 @@ public class ModelGateway {
     ModelRequest afterRateLimit(Provider provider, ModelRequest request, ModelCallException e, int attempt, long[] lastRequested) {
         String message = e.getMessage() == null ? "" : e.getMessage();
         String key = provider.id() + "|" + request.model();
+        // No credit left (OpenAI answers 429 insufficient_quota): waiting cannot help; the provider is out (unavailableFor).
+        if (outOfCredits(e)) return null;
         if (e.statusCode() == 0 && e.getCause() != null) {
             // No answer at all (timeout, connection reset): a network blip, waited out like a rate limit.
             // Status 0 without a cause is a configuration or protocol error: retrying cannot help.
